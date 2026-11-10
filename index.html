@@ -1,135 +1,1044 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SpendWise Dashboard</title>
-    <!-- Google Fonts Integration -->
+    <meta name="theme-color" content="#f8f2e5" />
+    <title>SpendWise | Dashboard</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Montserrat:wght@600;700&family=Open+Sans:wght@400;600&display=swap"
+      href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Manrope:wght@500;600;700;800&display=swap"
       rel="stylesheet"
     />
     <link rel="stylesheet" href="style.css" />
+    <link
+      rel="stylesheet"
+      href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.7.2/css/all.min.css"
+    />
+    <script src="script.js" defer></script>
   </head>
   <body>
-    <!-- Dashboard App Container (CSS Grid Layout) -->
-    <div class="dashboard-container">
-      
-      <!-- 1. Sidebar / Navigation Menu -->
+    <div class="toast-region" id="toast-region" aria-live="polite" aria-atomic="true"></div>
+    <section class="auth-screen" id="auth-screen" aria-labelledby="auth-title">
+      <div class="auth-shell">
+        <header class="auth-hero">
+          <a class="brand auth-brand" href="#" aria-label="SpendWise home">
+            <span class="brand-mark"><img src="assets/spendwise-logo.png" alt="" aria-hidden="true" /></span>
+            <span>spendwise</span>
+          </a>
+          <p class="eyebrow">A FINANCIAL HOME THAT FEELS LIKE YOURS</p>
+          <h1 id="auth-title">Welcome back</h1>
+          <p id="auth-description">Sign in to securely access your expenses.</p>
+        </header>
+        <div class="auth-card card">
+          <form id="login-form">
+            <div class="form-group">
+              <label for="login-email">Email</label>
+              <input
+                id="login-email"
+                type="email"
+                autocomplete="email"
+                maxlength="254"
+                required
+              />
+            </div>
+            <div class="form-group">
+              <label for="login-password">Password</label>
+              <input
+                id="login-password"
+                type="password"
+                autocomplete="current-password"
+                maxlength="128"
+                required
+              />
+            </div>
+            <button class="primary-button" type="submit">Sign in</button>
+          </form>
+          <form id="register-form" hidden>
+            <div class="form-group">
+              <label for="register-name">Display name</label>
+              <input
+                id="register-name"
+                type="text"
+                autocomplete="name"
+                maxlength="60"
+                required
+              />
+            </div>
+            <div class="form-group">
+              <label for="register-email">Email</label>
+              <input
+                id="register-email"
+                type="email"
+                autocomplete="email"
+                maxlength="254"
+                required
+              />
+            </div>
+            <div class="form-group">
+              <label for="register-password"
+                >Password</label
+              >
+              <input
+                id="register-password"
+                type="password"
+                autocomplete="new-password"
+                minlength="8"
+                maxlength="128"
+                aria-describedby="password-guidance"
+                required
+              />
+              <small class="auth-password-guidance" id="password-guidance">
+                Use at least 8 characters. A longer passphrase is even better.
+              </small>
+            </div>
+            <button class="primary-button" type="submit">Create account</button>
+          </form>
+          <form id="mfa-setup-form" hidden>
+            <p class="auth-step-copy">
+              Multi-factor authentication is required. Add this account to an
+              authenticator app, then enter its current 6-digit code.
+            </p>
+            <div class="auth-secret-card">
+              <span>Setup key</span>
+              <code id="mfa-secret"></code>
+              <button class="text-link" id="copy-mfa-secret" type="button">Copy setup key</button>
+            </div>
+            <div class="form-group">
+              <label for="mfa-setup-code">Authenticator code</label>
+              <input
+                id="mfa-setup-code"
+                type="text"
+                inputmode="numeric"
+                autocomplete="one-time-code"
+                pattern="[0-9]{6}"
+                maxlength="6"
+                required
+              />
+            </div>
+            <button class="primary-button" type="submit">Verify and finish setup</button>
+          </form>
+          <form id="mfa-verify-form" hidden>
+            <p class="auth-step-copy">
+              Enter the 6-digit code from your authenticator app, or use one of
+              your single-use recovery codes.
+            </p>
+            <div class="form-group">
+              <label for="mfa-login-code">Authenticator or recovery code</label>
+              <input
+                id="mfa-login-code"
+                type="text"
+                autocomplete="one-time-code"
+                maxlength="16"
+                required
+              />
+            </div>
+            <button class="primary-button" type="submit">Verify and sign in</button>
+          </form>
+          <section class="recovery-codes-panel" id="recovery-codes-panel" hidden>
+            <h2>Save your recovery codes</h2>
+            <p>Each code works once if you lose access to your authenticator.</p>
+            <pre id="recovery-codes"></pre>
+            <button class="primary-button" id="continue-after-recovery" type="button">I saved these codes</button>
+          </section>
+          <p
+            class="form-message"
+            id="auth-message"
+            role="status"
+            aria-live="polite"
+          ></p>
+          <button
+            class="text-link auth-mode-toggle"
+            id="auth-mode-toggle"
+            type="button"
+          >
+            Create an account
+          </button>
+          <button
+            class="text-link auth-resend-verification"
+            id="auth-resend-verification"
+            type="button"
+            hidden
+          >
+            Resend verification email
+          </button>
+          <button
+            class="text-link auth-back-to-login"
+            id="auth-back-to-login"
+            type="button"
+            hidden
+          >
+            Back to sign in
+          </button>
+          <button
+            class="secondary-button auth-retry"
+            id="auth-retry"
+            type="button"
+            hidden
+          >
+            Retry connection
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <div class="dashboard-container" id="app-shell" hidden>
       <aside class="sidebar">
-        <h2>SpendWise</h2>
-        <nav>
+        <a class="brand" href="#dashboard" aria-label="SpendWise dashboard">
+          <span class="brand-mark"><img src="assets/spendwise-logo.png" alt="" aria-hidden="true" /></span>
+          <span>spendwise</span>
+        </a>
+        <button class="sidebar-add-expense" id="sidebar-add-expense" type="button">
+          <i class="fa-solid fa-plus" aria-hidden="true"></i>
+          <span>Add expense</span>
+        </button>
+        <nav aria-label="Main navigation">
+          <p class="nav-label">Overview</p>
           <ul>
-            <li><a href="#" class="active">Dashboard</a></li>
-            <li><a href="#">Expenses</a></li>
-            <li><a href="#">Categories</a></li>
-            <li><a href="#">Analytics</a></li>
-            <li><a href="#">Settings</a></li>
+            <li class="nav-item-dashboard">
+              <a href="#dashboard" class="active" aria-current="page"
+                ><i class="fa-solid fa-gauge-high" aria-hidden="true"></i
+                ><span>Dashboard</span></a
+              >
+            </li>
+            <li class="nav-item-expenses">
+              <a href="#expenses"
+                ><i class="fa-solid fa-receipt" aria-hidden="true"></i
+                ><span>Expenses</span></a
+              >
+            </li>
+            <li class="nav-item-categories">
+              <a href="#categories"
+                ><i class="fa-solid fa-chart-pie" aria-hidden="true"></i
+                ><span>Categories</span></a
+              >
+            </li>
+            <li class="nav-item-analytics">
+              <a href="#analytics"
+                ><i class="fa-solid fa-chart-line" aria-hidden="true"></i
+                ><span>Analytics</span></a
+              >
+            </li>
           </ul>
+          <p class="nav-label nav-label-tools">Preferences</p>
+          <ul>
+            <li class="nav-item-settings">
+              <a href="#settings"
+                ><i class="fa-solid fa-gear" aria-hidden="true"></i
+                ><span>Settings</span></a
+              >
+            </li>
+          </ul>
+          <button class="mobile-nav-add" id="mobile-nav-add" type="button" aria-label="Add expense">
+            <i class="fa-solid fa-plus" aria-hidden="true"></i>
+            <span class="visually-hidden">Add expense</span>
+          </button>
         </nav>
+        <div class="sidebar-profile">
+          <span class="avatar" id="sidebar-avatar" aria-hidden="true">M</span>
+          <span class="profile-copy"
+            ><strong id="sidebar-user-name">Michael</strong
+            ><small id="sidebar-account-email">Personal account</small></span
+          >
+          <span class="sidebar-profile-actions">
+            <a class="icon-button sidebar-settings" href="#settings" aria-label="Account settings">
+              <i class="fa-solid fa-gear" aria-hidden="true"></i>
+            </a>
+            <button class="icon-button sidebar-signout" id="sidebar-signout" type="button" aria-label="Sign out">
+              <i class="fa-solid fa-right-from-bracket" aria-hidden="true"></i>
+            </button>
+          </span>
+        </div>
       </aside>
 
-      <!-- Main Content Area -->
-      <div class="main-content">
-        
-        <!-- 2. Header Section -->
-        <header class="dashboard-header">
-          <h1>Dashboard Overview</h1>
-          <p>Welcome back, Michael! Track your financial health below.</p>
+      <main class="main-content">
+        <header class="topbar">
+          <div class="search-container" id="search-container">
+            <label class="search-box">
+              <i class="fa-solid fa-magnifying-glass" aria-hidden="true"></i>
+              <span class="visually-hidden">Search expenses, categories, and recurring schedules</span>
+              <input
+                id="expense-search"
+                type="search"
+                placeholder="Search expenses, categories, recurring..."
+                autocomplete="off"
+                role="combobox"
+                aria-haspopup="listbox"
+                aria-autocomplete="list"
+                aria-expanded="false"
+                aria-controls="search-results"
+              />
+              <button class="search-clear" id="search-clear" type="button" aria-label="Clear search" hidden>×</button>
+              <kbd>Ctrl K</kbd>
+            </label>
+            <div class="search-results" id="search-results" role="listbox" aria-label="Search results" hidden></div>
+          </div>
+          <div class="topbar-actions">
+            <div class="quick-filter" id="category-filter-control">
+              <span class="visually-hidden" id="category-filter-label"
+                >Filter by category</span
+              >
+              <i class="fa-solid fa-filter" aria-hidden="true"></i>
+              <select
+                id="category-filter"
+                class="category-filter-native"
+                aria-hidden="true"
+                tabindex="-1"
+              >
+                <option value="all">All categories</option>
+                <option value="Food">Food &amp; Groceries</option>
+                <option value="Transport">Transport</option>
+                <option value="Housing">Housing</option>
+                <option value="Entertainment">Entertainment</option>
+                <option value="Savings">Savings</option>
+                <option value="Utilities">Utilities</option>
+                <option value="Other">Other</option>
+              </select>
+              <button
+                class="category-filter-trigger"
+                id="category-filter-trigger"
+                type="button"
+                aria-haspopup="listbox"
+                aria-expanded="false"
+                aria-labelledby="category-filter-label category-filter-value"
+                aria-controls="category-filter-options"
+              >
+                <span id="category-filter-value">All categories</span>
+                <span class="category-filter-chevron" aria-hidden="true"></span>
+              </button>
+              <div
+                class="category-filter-menu"
+                id="category-filter-options"
+                role="listbox"
+                aria-labelledby="category-filter-label"
+                hidden
+              ></div>
+            </div>
+            <button
+              class="icon-button notification-button"
+              id="notification-button"
+              type="button"
+              aria-label="Notifications"
+              aria-expanded="false"
+              aria-controls="notification-panel"
+            >
+              <i class="fa-solid fa-bell" aria-hidden="true"></i>
+              <span class="notification-dot" aria-hidden="true"></span>
+            </button>
+            <a
+              class="icon-button profile-button"
+              href="#settings"
+              aria-label="Open settings"
+              ><i class="fa-solid fa-user" aria-hidden="true"></i
+            ></a>
+            <button
+              class="primary-button add-expense-trigger"
+              id="open-expense-dialog"
+              type="button"
+            >
+              <i class="fa-solid fa-plus" aria-hidden="true"></i
+              ><span>Add expense</span>
+            </button>
+          </div>
+          <div class="notification-panel" id="notification-panel" hidden>
+            <div class="notification-panel-header">
+              <strong>Alerts</strong>
+              <span class="notification-pill">Live</span>
+            </div>
+            <div class="notification-list" id="notification-list"></div>
+            <p id="notification-message">
+              New activity and budget alerts will appear here.
+            </p>
+          </div>
         </header>
 
-        <!-- 3. At Least Six Category Cards -->
-        <section class="categories-grid">
-          <div class="card category-card" tabindex="0">
-            <h3>Food & Groceries</h3>
-            <p class="amount">$150.00</p>
-            <span class="status-tag">On Track</span>
-          </div>
-          <div class="card category-card" tabindex="0">
-            <h3>Transport</h3>
-            <p class="amount">$45.00</p>
-            <span class="status-tag">Moderate</span>
-          </div>
-          <div class="card category-card" tabindex="0">
-            <h3>Rent & Housing</h3>
-            <p class="amount">$800.00</p>
-            <span class="status-tag">Paid</span>
-          </div>
-          <div class="card category-card" tabindex="0">
-            <h3>Entertainment</h3>
-            <p class="amount">$60.00</p>
-            <span class="status-tag">Saved</span>
-          </div>
-          <div class="card category-card" tabindex="0">
-            <h3>Savings</h3>
-            <p class="amount">$300.00</p>
-            <span class="status-tag">Growing</span>
-          </div>
-          <div class="card category-card" tabindex="0">
-            <h3>Utilities</h3>
-            <p class="amount">$95.00</p>
-            <span class="status-tag">Due Soon</span>
+        <dialog
+          class="expense-dialog"
+          id="expense-dialog"
+          aria-labelledby="add-expense-title"
+        >
+          <section class="card add-expense-section">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">TRANSACTION</p>
+                <h2 id="add-expense-title">Add new expense</h2>
+                <p class="muted-text">
+                  Record a purchase and keep your budget on track.
+                </p>
+              </div>
+              <button
+                class="icon-button close-dialog"
+                id="close-expense-dialog"
+                type="button"
+                aria-label="Close expense form"
+              >
+                <i class="fa-solid fa-xmark" aria-hidden="true"></i>
+              </button>
+            </div>
+            <form id="expense-form">
+              <div class="form-group">
+                <label for="expense-name">Expense name</label>
+                <input
+                  type="text"
+                  id="expense-name"
+                  placeholder="e.g. Weekly groceries"
+                  maxlength="80"
+                  required
+                />
+              </div>
+              <div class="form-group">
+                <label for="expense-amount">Amount (<span data-currency-code>USD</span>)</label>
+                <input
+                  type="number"
+                  id="expense-amount"
+                  placeholder="0.00"
+                  min="0.01"
+                  step="0.01"
+                  required
+                />
+              </div>
+              <div class="form-group">
+                <label for="expense-date">Date</label>
+                <div class="expense-date-wrap">
+                  <i class="fa-solid fa-calendar-days" aria-hidden="true"></i>
+                  <input
+                    type="date"
+                    id="expense-date"
+                    aria-describedby="expense-date-help"
+                    required
+                  />
+                </div>
+                <div class="expense-date-footer">
+                  <p id="expense-date-help">Choose when this expense occurred.</p>
+                  <button class="expense-date-today" id="expense-date-today" type="button">Today</button>
+                </div>
+              </div>
+              <div class="form-group">
+                <label for="expense-description">Description</label>
+                <input
+                  type="text"
+                  id="expense-description"
+                  placeholder="Add a note (optional)"
+                  maxlength="160"
+                />
+              </div>
+              <div class="form-group">
+                <label id="expense-category-label" for="expense-category-trigger">Category</label>
+                <div class="category-select-wrap">
+                  <i class="fa-solid fa-tag" aria-hidden="true"></i>
+                  <select
+                    id="expense-category"
+                    name="category"
+                    class="expense-category-native"
+                    aria-describedby="expense-category-description"
+                    aria-hidden="true"
+                    tabindex="-1"
+                    required
+                  >
+                    <option value="Food">Food &amp; Groceries</option>
+                    <option value="Transport">Transport</option>
+                    <option value="Housing">Housing</option>
+                    <option value="Entertainment">Entertainment</option>
+                    <option value="Savings">Savings</option>
+                    <option value="Utilities">Utilities</option>
+                    <option value="Other">Other</option>
+                  </select>
+                  <button
+                    class="category-select-trigger"
+                    id="expense-category-trigger"
+                    type="button"
+                    role="combobox"
+                    aria-haspopup="listbox"
+                    aria-expanded="false"
+                    aria-labelledby="expense-category-label expense-category-value"
+                    aria-controls="expense-category-options"
+                    aria-describedby="expense-category-description"
+                  >
+                    <span id="expense-category-value">Food &amp; Groceries</span>
+                    <span class="category-select-chevron" aria-hidden="true"></span>
+                  </button>
+                  <div
+                    class="category-select-menu"
+                    id="expense-category-options"
+                    role="listbox"
+                    aria-labelledby="expense-category-label"
+                    hidden
+                  ></div>
+                </div>
+                <p
+                  class="category-select-description"
+                  id="expense-category-description"
+                  aria-live="polite"
+                ></p>
+              </div>
+              <button class="primary-button" type="submit">
+                <i class="fa-solid fa-plus" aria-hidden="true"></i>Add expense
+              </button>
+              <p
+                class="form-message"
+                id="expense-form-message"
+                role="status"
+                aria-live="polite"
+              ></p>
+            </form>
+          </section>
+        </dialog>
+
+        <section
+          class="page-section"
+          id="dashboard"
+          aria-labelledby="dashboard-title"
+        >
+          <header class="dashboard-header">
+            <div>
+              <p class="eyebrow" id="dashboard-date"></p>
+              <h1 id="dashboard-title">Good morning, Michael</h1>
+              <p id="welcome-message">
+                Here’s your spending overview. You’re doing great—keep it up.
+              </p>
+            </div>
+            <a class="date-shortcut" href="#analytics"
+              ><i class="fa-solid fa-calendar-days" aria-hidden="true"></i
+              ><span id="current-month-label">This month</span
+              ><i class="fa-solid fa-chevron-down" aria-hidden="true"></i
+            ></a>
+          </header>
+
+          <div class="dashboard-layout">
+            <div class="dashboard-primary">
+              <section
+                class="insight-grid"
+                aria-label="Monthly spending insights"
+              >
+                <article class="insight-card patients-card">
+                  <div class="insight-card-heading">
+                    <h2>Spending overview</h2>
+                    <i class="fa-solid fa-wallet" aria-hidden="true"></i>
+                  </div>
+                  <p class="insight-main-value" id="total-spent">$0.00</p>
+                  <p class="insight-caption">spent this month</p>
+                  <div
+                    class="mini-bars"
+                    id="weekly-spending-bars"
+                    aria-label="Spending by week"
+                  ></div>
+                  <div class="chart-footnote">
+                    <span>Week 1</span><span>Week 5</span>
+                  </div>
+                </article>
+
+                <article class="insight-card visits-card">
+                  <div class="insight-card-heading">
+                    <h2>Spending activity</h2>
+                    <i class="fa-solid fa-chart-line" aria-hidden="true"></i>
+                  </div>
+                  <div class="activity-stats">
+                    <div>
+                      <strong id="activity-transactions">0</strong
+                      ><span>TRANSACTIONS</span>
+                    </div>
+                    <div>
+                      <strong id="activity-average">$0</strong
+                      ><span>AVERAGE</span>
+                    </div>
+                    <div>
+                      <strong id="activity-daily">$0</strong
+                      ><span>DAILY AVG.</span>
+                    </div>
+                  </div>
+                  <div class="line-chart-wrap">
+                    <svg
+                      class="activity-chart"
+                      id="activity-chart"
+                      viewBox="0 0 480 108"
+                      role="img"
+                      aria-label="Spending trend throughout the month"
+                    >
+                      <defs>
+                        <linearGradient
+                          id="chart-fill"
+                          x1="0"
+                          x2="0"
+                          y1="0"
+                          y2="1"
+                        >
+                          <stop
+                            offset="0%"
+                            stop-color="#b66c9a"
+                            stop-opacity=".24"
+                          />
+                          <stop
+                            offset="100%"
+                            stop-color="#b66c9a"
+                            stop-opacity="0"
+                          />
+                        </linearGradient>
+                      </defs>
+                      <path class="chart-area" id="activity-area" d="" />
+                      <polyline
+                        class="chart-line"
+                        id="activity-line"
+                        points=""
+                      />
+                      <circle
+                        class="chart-point"
+                        id="activity-point"
+                        cx="0"
+                        cy="0"
+                        r="4"
+                      />
+                    </svg>
+                  </div>
+                  <div class="chart-footnote">
+                    <span>Start of month</span
+                    ><span id="chart-month-end">End of month</span>
+                  </div>
+                </article>
+
+                <article class="insight-card condition-card">
+                  <div class="insight-card-heading">
+                    <h2>By category</h2>
+                    <i class="fa-solid fa-chart-pie" aria-hidden="true"></i>
+                  </div>
+                  <div
+                    class="category-snapshot"
+                    id="dashboard-category-snapshot"
+                  ></div>
+                  <a class="card-link" href="#categories"
+                    >Explore categories
+                    <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i
+                  ></a>
+                </article>
+
+                <article class="insight-card sessions-card">
+                  <div class="insight-card-heading">
+                    <h2>Budget check-in</h2>
+                    <i class="fa-solid fa-bullseye" aria-hidden="true"></i>
+                  </div>
+                  <div class="budget-checkin">
+                    <div>
+                      <strong id="budget-used">0%</strong><span>USED</span>
+                    </div>
+                    <div>
+                      <strong id="remaining-balance">$0</strong
+                      ><span>REMAINING</span>
+                    </div>
+                    <div>
+                      <strong id="budget-daily">$0</strong
+                      ><span>DAILY PACE</span>
+                    </div>
+                  </div>
+                  <div class="budget-progress">
+                    <span id="budget-progress-bar"></span>
+                  </div>
+                  <p class="budget-footnote">
+                    <span id="monthly-budget">$0.00</span> monthly budget
+                  </p>
+                </article>
+              </section>
+
+              <section class="dashboard-lower-grid">
+                <article class="card transactions-card">
+                  <div class="section-heading">
+                    <div>
+                      <p class="eyebrow">YOUR ACTIVITY</p>
+                      <h2>Recent expenses</h2>
+                    </div>
+                    <a class="text-link" href="#expenses"
+                      >View all
+                      <i class="fa-solid fa-arrow-right" aria-hidden="true"></i
+                    ></a>
+                  </div>
+                  <div class="transaction-list" id="recent-expenses-list"></div>
+                </article>
+                <article
+                  class="card expense-detail-card"
+                  id="expense-detail-card"
+                >
+                  <div class="section-heading">
+                    <div>
+                      <p class="eyebrow">SELECTED TRANSACTION</p>
+                      <h2>Expense details</h2>
+                    </div>
+                    <i class="fa-solid fa-receipt" aria-hidden="true"></i>
+                  </div>
+                  <div id="selected-expense-details"></div>
+                </article>
+              </section>
+            </div>
+
+            <aside
+              class="dashboard-rail"
+              aria-label="Calendar and selected day expenses"
+            >
+              <section class="calendar-card">
+                <div class="calendar-heading">
+                  <h2>Calendar</h2>
+                  <div class="calendar-controls">
+                    <button
+                      class="calendar-nav"
+                      id="calendar-prev"
+                      type="button"
+                      aria-label="Previous month"
+                    >
+                      <i class="fa-solid fa-chevron-left" aria-hidden="true"></i>
+                    </button>
+                    <span id="calendar-month">October 2026</span>
+                    <button
+                      class="calendar-nav"
+                      id="calendar-next"
+                      type="button"
+                      aria-label="Next month"
+                    >
+                      <i class="fa-solid fa-chevron-right" aria-hidden="true"></i>
+                    </button>
+                  </div>
+                </div>
+                <div class="calendar-weekdays" aria-hidden="true">
+                  <span>Mo</span><span>Tu</span><span>We</span><span>Th</span
+                  ><span>Fr</span><span>Sa</span><span>Su</span>
+                </div>
+                <div
+                  class="calendar-days"
+                  id="calendar-days"
+                  role="grid"
+                  aria-label="Expense calendar"
+                ></div>
+                <div class="calendar-legend">
+                  <span><i></i> Expense recorded</span
+                  ><button id="calendar-today" type="button">Today</button>
+                </div>
+              </section>
+
+              <section class="timeline-card">
+                <div class="timeline-heading">
+                  <div>
+                    <p class="eyebrow">DAILY ACTIVITY</p>
+                    <h2 id="selected-date-title">Today</h2>
+                  </div>
+                  <button
+                    class="icon-button"
+                    id="timeline-add-expense"
+                    type="button"
+                    aria-label="Add expense for selected date"
+                  >
+                    <i class="fa-solid fa-plus" aria-hidden="true"></i>
+                  </button>
+                </div>
+                <div class="timeline-list" id="daily-expenses-list"></div>
+                <a class="timeline-footer" href="#expenses"
+                  >View all expenses
+                  <i class="fa-solid fa-arrow-up-right-from-square" aria-hidden="true"></i
+                ></a>
+              </section>
+            </aside>
           </div>
         </section>
 
-        <!-- 4. Expense Form & Table Section -->
-        <div class="content-grid">
-          <section class="card add-expense-section">
-            <h2>Add New Expense</h2>
-            <form action="#" method="POST">
+        <section
+          class="page-section"
+          id="expenses"
+          aria-labelledby="expenses-title"
+          hidden
+        >
+          <header class="page-header">
+            <div>
+              <p class="eyebrow">TRANSACTION HISTORY</p>
+              <h1 id="expenses-title">Expenses</h1>
+              <p class="muted-text">
+                Search, filter, and review your recorded transactions.
+              </p>
+            </div>
+          </header>
+          <section class="card full-transactions-card">
+            <div class="section-heading">
+              <div>
+                <h2>All transactions</h2>
+                <p class="muted-text" id="expense-result-count"></p>
+              </div>
+              <div class="table-actions">
+                <span class="table-filter-label"
+                  ><i class="fa-solid fa-filter" aria-hidden="true"></i> Uses
+                  filters above</span
+                ><a
+                  class="secondary-button export-button"
+                  href="/api/expenses/export.csv"
+                  >Export CSV</a
+                >
+              </div>
+            </div>
+            <div class="table-wrapper">
+              <table class="expense-table">
+                <thead>
+                  <tr>
+                    <th>Expense</th>
+                    <th>Amount</th>
+                    <th>Category</th>
+                    <th>Date</th>
+                    <th>Description</th>
+                  </tr>
+                </thead>
+                <tbody id="expense-table-body"></tbody>
+              </table>
+            </div>
+          </section>
+        </section>
+
+        <section
+          class="page-section"
+          id="categories"
+          aria-labelledby="categories-title"
+          hidden
+        >
+          <header class="page-header">
+            <div>
+              <p class="eyebrow">SPENDING ORGANIZED</p>
+              <h1 id="categories-title">Categories</h1>
+              <p class="muted-text">
+                Review how spending is distributed across your categories.
+              </p>
+            </div>
+          </header>
+          <section
+            class="categories-grid"
+            id="category-grid"
+            aria-label="Expense categories"
+          ></section>
+        </section>
+
+        <section
+          class="page-section"
+          id="analytics"
+          aria-labelledby="analytics-title"
+          hidden
+        >
+          <header class="page-header">
+            <div>
+              <p class="eyebrow">YOUR MONEY, IN FOCUS</p>
+              <h1 id="analytics-title">Analytics</h1>
+              <p class="muted-text">
+                Understand your spending patterns and budget progress.
+              </p>
+            </div>
+          </header>
+          <section
+            class="categories-grid analytics-summary-grid"
+            aria-label="Spending analytics summary"
+          >
+            <article class="card analytics-stat-card">
+              <span class="stat-icon yellow-icon"
+                ><i class="fa-solid fa-money-bill-wave" aria-hidden="true"></i
+              ></span>
+              <h2>Total expenses</h2>
+              <p class="amount" id="analytics-total">$0.00</p>
+            </article>
+            <article class="card analytics-stat-card">
+              <span class="stat-icon pink-icon"
+                ><i class="fa-solid fa-receipt" aria-hidden="true"></i
+              ></span>
+              <h2>Transactions</h2>
+              <p class="amount" id="analytics-count">0</p>
+            </article>
+            <article class="card analytics-stat-card">
+              <span class="stat-icon blue-icon"
+                ><i
+                  class="fa-solid fa-chart-column"
+                  aria-hidden="true"
+                ></i
+              ></span>
+              <h2>Average expense</h2>
+              <p class="amount" id="analytics-average">$0.00</p>
+            </article>
+          </section>
+          <section class="card analytics-card">
+            <div class="section-heading">
+              <div>
+                <p class="eyebrow">MONTHLY BREAKDOWN</p>
+                <h2>Spending by category</h2>
+                <p class="muted-text">
+                  See each category’s share of spending this month.
+                </p>
+              </div>
+            </div>
+            <div class="analytics-list" id="analytics-category-list"></div>
+          </section>
+        </section>
+
+        <section
+          class="page-section"
+          id="settings"
+          aria-labelledby="settings-title"
+          hidden
+        >
+          <header class="page-header">
+            <div>
+              <p class="eyebrow">MAKE IT YOURS</p>
+              <h1 id="settings-title">Settings</h1>
+              <p class="muted-text">
+                Personalize your dashboard and set your monthly spending limit.
+              </p>
+            </div>
+          </header>
+          <section class="card settings-card">
+            <span class="settings-icon"
+              ><i class="fa-solid fa-sliders" aria-hidden="true"></i
+            ></span>
+            <h2>Preferences</h2>
+            <p class="muted-text">
+              These preferences are used across your SpendWise dashboard.
+            </p>
+            <form id="settings-form">
               <div class="form-group">
-                <label for="expense-name">Expense Name:</label>
-                <input type="text" id="expense-name" placeholder="Enter expense name" required />
+                <label for="user-name">Display name</label
+                ><input type="text" id="user-name" maxlength="60" required />
               </div>
               <div class="form-group">
-                <label for="expense-amount">Amount ($):</label>
-                <input type="number" id="expense-amount" placeholder="Enter amount" required />
+                <label for="budget-amount">Monthly budget (<span data-currency-code>USD</span>)</label
+                ><input
+                  type="number"
+                  id="budget-amount"
+                  min="0.01"
+                  step="0.01"
+                  required
+                />
               </div>
               <div class="form-group">
-                <label for="expense-category">Category:</label>
-                <select id="expense-category" name="category">
-                  <option value="food">Food</option>
-                  <option value="transport">Transport</option>
-                  <option value="rent">Rent</option>
-                  <option value="entertainment">Entertainment</option>
+                <label for="default-currency">Default currency</label>
+                <select id="default-currency" required>
+                  <option value="USD">USD — US Dollar</option>
+                  <option value="EUR">EUR — Euro</option>
+                  <option value="GBP">GBP — British Pound</option>
+                  <option value="CAD">CAD — Canadian Dollar</option>
+                  <option value="AUD">AUD — Australian Dollar</option>
+                  <option value="NZD">NZD — New Zealand Dollar</option>
+                  <option value="JPY">JPY — Japanese Yen</option>
+                  <option value="CNY">CNY — Chinese Yuan</option>
+                  <option value="INR">INR — Indian Rupee</option>
+                  <option value="NGN">NGN — Nigerian Naira</option>
+                  <option value="KES">KES — Kenyan Shilling</option>
+                  <option value="ZAR">ZAR — South African Rand</option>
+                  <option value="GHS">GHS — Ghanaian Cedi</option>
+                  <option value="UGX">UGX — Ugandan Shilling</option>
+                  <option value="TZS">TZS — Tanzanian Shilling</option>
+                  <option value="RWF">RWF — Rwandan Franc</option>
+                  <option value="AED">AED — UAE Dirham</option>
+                  <option value="CHF">CHF — Swiss Franc</option>
+                  <option value="SGD">SGD — Singapore Dollar</option>
                 </select>
+                <small class="settings-help-text">
+                  Changes how amounts are displayed; existing amounts are not converted.
+                </small>
               </div>
-              <button type="button">Add Expense</button>
+              <button class="primary-button" type="submit">
+                <i class="fa-solid fa-floppy-disk" aria-hidden="true"></i>Save settings
+              </button>
+              <p
+                class="form-message"
+                id="settings-message"
+                role="status"
+                aria-live="polite"
+              ></p>
             </form>
           </section>
-
-          <section class="card your-expenses">
-            <h2>Recent Transactions</h2>
-            <table class="expense-table">
-              <thead>
-                <tr>
-                  <th>Name</th>
-                  <th>Amount</th>
-                  <th>Category</th>
-                </tr>
-              </thead>
-              <tbody>
-                <tr>
-                  <td>Groceries</td>
-                  <td>$150.00</td>
-                  <td>Food</td>
-                </tr>
-                <tr>
-                  <td>Bus Fare</td>
-                  <td>$25.00</td>
-                  <td>Transport</td>
-                </tr>
-              </tbody>
-            </table>
+          <section class="card settings-card account-card">
+            <h2>Account</h2>
+            <p class="muted-text" id="account-email"></p>
+            <button class="secondary-button" id="logout-button" type="button">
+              Sign out
+            </button>
           </section>
-        </div>
-
-      </div>
+          <section class="card settings-card">
+            <h2>Custom categories</h2>
+            <p class="muted-text">
+              Create categories for your own expense types. Categories in use
+              cannot be removed.
+            </p>
+            <form id="category-form" class="inline-form">
+              <div class="form-group">
+                <label for="new-category-name">Category name</label
+                ><input
+                  type="text"
+                  id="new-category-name"
+                  maxlength="40"
+                  required
+                />
+              </div>
+              <button class="secondary-button" type="submit">
+                Add category
+              </button>
+            </form>
+            <p
+              class="form-message"
+              id="category-message"
+              role="status"
+              aria-live="polite"
+            ></p>
+            <div class="managed-list" id="managed-category-list"></div>
+          </section>
+          <section class="card settings-card">
+            <h2>Monthly recurring expenses</h2>
+            <p class="muted-text">
+              Scheduled expenses are automatically recorded each month on the
+              selected day (1–28).
+            </p>
+            <form id="recurring-form" class="recurring-form">
+              <div class="form-group">
+                <label for="recurring-name">Expense name</label
+                ><input
+                  id="recurring-name"
+                  type="text"
+                  maxlength="80"
+                  required
+                />
+              </div>
+              <div class="form-group">
+                <label for="recurring-amount">Amount (<span data-currency-code>USD</span>)</label
+                ><input
+                  id="recurring-amount"
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  required
+                />
+              </div>
+              <div class="form-group">
+                <label for="recurring-category">Category</label
+                ><select id="recurring-category" required></select>
+              </div>
+              <div class="form-group">
+                <label for="recurring-day">Monthly day</label
+                ><input
+                  id="recurring-day"
+                  type="number"
+                  min="1"
+                  max="28"
+                  value="1"
+                  required
+                />
+              </div>
+              <div class="form-group">
+                <label for="recurring-description">Description</label
+                ><input
+                  id="recurring-description"
+                  type="text"
+                  maxlength="160"
+                />
+              </div>
+              <button class="secondary-button" type="submit">
+                Add recurring expense
+              </button>
+            </form>
+            <p
+              class="form-message"
+              id="recurring-message"
+              role="status"
+              aria-live="polite"
+            ></p>
+            <div class="managed-list" id="recurring-list"></div>
+          </section>
+        </section>
+      </main>
     </div>
-
-    <!-- Add the source link for the javascript file-->
-    <script src="script.js"></script>
   </body>
 </html>

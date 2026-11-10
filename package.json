@@ -1,0 +1,16 @@
+{
+  "name": "spendwise-dashboard",
+  "version": "1.0.0",
+  "description": "Full-stack expense tracker dashboard",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "migrate:supabase": "node scripts/import-json-to-supabase.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "nodemailer": "^7.0.3"
+  }
+}

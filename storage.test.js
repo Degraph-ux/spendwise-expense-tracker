@@ -1,10 +1,8 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const fs = require('node:fs');
 const os = require('node:os');
-const path = require('node:path');
 const { SupabaseDocumentStorage, createStorage, JsonFileStorage } = require('./storage');
-const { importJsonFiles } = require('./scripts/import-json-to-supabase');
+const { makeRows } = require('./scripts/import-json-to-supabase');
 
 test('Supabase storage reads JSON documents with the service-role credential', async () => {
   let requestUrl;
@@ -63,25 +61,28 @@ test('Supabase storage upserts documents and surfaces database failures', async 
   await assert.rejects(failedStorage.read('settings.json', {}), /Supabase storage request failed \(503\)/);
 });
 
-test('JSON import preserves root and per-account document keys', async (t) => {
-  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spendwise-import-'));
-  t.after(() => fs.rmSync(dataDir, { recursive: true, force: true }));
-  const accountDirectory = path.join(dataDir, 'users', 'account-1');
-  fs.mkdirSync(accountDirectory, { recursive: true });
-  fs.writeFileSync(path.join(dataDir, 'users.json'), JSON.stringify([{ id: 'account-1' }]));
-  fs.writeFileSync(path.join(accountDirectory, 'expenses.json'), JSON.stringify([{ id: 'expense-1' }]));
-  fs.writeFileSync(path.join(dataDir, '.mfa-encryption-key'), 'not imported');
+test('legacy migration maps expenses to relational rows and keeps monetary values decimal', () => {
+  const account = { id: 'c59090e8-55f7-453d-9332-b4ad1f3a7619', email: 'legacy@example.test' };
+  const systemCategories = ['Food', 'Transport', 'Housing', 'Entertainment', 'Savings', 'Utilities', 'Other']
+    .map((name, index) => ({ id: `${index + 1}b15dd0c-79d9-4c34-9b4a-57659914a605`, name }));
+  const rows = makeRows(account, 'c59090e8-55f7-453d-9332-b4ad1f3a7619', {
+    'settings.json': { displayName: 'Legacy', monthlyBudget: 900, currency: 'EUR' },
+    'categories.json': [],
+    'expenses.json': [{
+      id: '36a6bd6d-28a5-4e31-beb6-cc301e4bd4a8',
+      name: 'Lunch',
+      amount: 12.34,
+      category: 'Food',
+      date: '2026-11-13'
+    }]
+  }, systemCategories);
 
-  const importedDocuments = [];
-  const count = await importJsonFiles(dataDir, {
-    write: async (key, data) => importedDocuments.push({ key, data })
-  });
-
-  assert.equal(count, 2);
-  assert.deepEqual(importedDocuments.map(({ key }) => key).sort(), [
-    'users.json',
-    'users/account-1/expenses.json'
-  ]);
+  assert.equal(rows.profile.monthly_budget, '900');
+  assert.equal(rows.profile.currency, 'EUR');
+  assert.equal(rows.expenses[0].title, 'Lunch');
+  assert.equal(rows.expenses[0].amount, '12.34');
+  assert.equal(rows.expenses[0].category_id, systemCategories[0].id);
+  assert.equal(rows.expenses[0].user_id, account.id);
 });
 
 test('storage selection requires Supabase in production', () => {

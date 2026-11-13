@@ -1,3 +1,5 @@
+-- Legacy schema for the previous JSONB-document storage adapter.
+-- New deployments should apply the ordered files in supabase/migrations instead.
 create table if not exists public.app_documents (
   key text primary key,
   data jsonb not null,

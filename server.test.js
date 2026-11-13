@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const crypto = require('node:crypto');
-const { createApp } = require('./server');
+const { createApp, loadEnvFile } = require('./server');
 
 const TEST_MFA_KEY = 'spendwise-test-key-that-is-at-least-32-characters';
 
@@ -77,16 +77,16 @@ async function registerAndCompleteMfa(request, sentEmails, email, displayName, c
     body: JSON.stringify({ email, password })
   });
   assert.equal(login.response.status, 200);
-  assert.deepEqual(login.body, { mfaRequired: true, setupRequired: true });
-  const challengeCookie = cookieFrom(login.response, 'spendwise_mfa_challenge');
-  assert.equal((await request('/api/auth/me', {}, challengeCookie)).response.status, 401);
-  const setup = await request('/api/auth/mfa/setup', {}, challengeCookie);
+  assert.deepEqual(login.body, { mfaOptional: true });
+  const sessionCookie = cookieFrom(login.response, 'spendwise_session');
+  assert.equal((await request('/api/auth/me', {}, sessionCookie)).response.status, 200);
+  const setup = await request('/api/auth/mfa/setup', {}, sessionCookie);
   assert.equal(setup.response.status, 200);
   const mfa = await request('/api/auth/mfa/setup', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ code: testTotp(setup.body.secret) })
-  }, challengeCookie);
+  }, sessionCookie);
   assert.equal(mfa.response.status, 200);
   assert.equal(mfa.body.recoveryCodes.length, 10);
   return { user: mfa.body.user, cookie: cookieFrom(mfa.response, 'spendwise_session'), recoveryCodes: mfa.body.recoveryCodes };
@@ -257,6 +257,22 @@ test('accounts isolate data and expense, category, recurring, and export APIs wo
   }, first.cookie);
   assert.equal(schedule.response.status, 201);
 
+  const todayDay = new Date().getDate();
+  const dueSchedule = await request('/api/recurring', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'Today recurring expense', amount: 25, category: 'Housing', day: Math.min(todayDay, 28) })
+  }, first.cookie);
+  assert.equal(dueSchedule.response.status, 201);
+  if (todayDay <= 28) {
+    assert.ok(dueSchedule.body.generatedExpense);
+    assert.equal(dueSchedule.body.generatedExpense.recurringId, dueSchedule.body.id);
+    const savedExpenses = await request('/api/expenses', {}, first.cookie);
+    assert.ok(savedExpenses.body.some((item) => item.id === dueSchedule.body.generatedExpense.id));
+  } else {
+    assert.equal(dueSchedule.body.generatedExpense, null);
+  }
+
   const recurringFile = path.join(dataDir, 'users', first.user.id, 'recurring.json');
   const schedules = JSON.parse(fs.readFileSync(recurringFile, 'utf8'));
   const yesterday = new Date();
@@ -277,9 +293,152 @@ test('accounts isolate data and expense, category, recurring, and export APIs wo
   assert.match(csv.response.headers.get('content-type'), /text\/csv/);
   assert.match(csv.body, /"'=SUM\(1,1\)"/);
 
+  const editableExpense = await request('/api/expenses', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Temporary record',
+      amount: 10,
+      category: 'Food',
+      date: new Date().toISOString().slice(0, 10)
+    })
+  }, first.cookie);
+  assert.equal(editableExpense.response.status, 201);
+
+  const updatedExpense = await request(`/api/expenses/${encodeURIComponent(editableExpense.body.id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Updated record',
+      amount: 12.5,
+      category: 'Food',
+      date: new Date().toISOString().slice(0, 10),
+      description: 'Updated successfully'
+    })
+  }, first.cookie);
+  assert.equal(updatedExpense.response.status, 200);
+  assert.equal(updatedExpense.body.amount, 12.5);
+  const rereadExpenses = await request('/api/expenses', {}, first.cookie);
+  assert.ok(rereadExpenses.body.some((item) =>
+    item.id === editableExpense.body.id && item.name === 'Updated record' && item.amount === 12.5
+  ));
+
+  const removedExpense = await request(`/api/expenses/${encodeURIComponent(editableExpense.body.id)}`, {
+    method: 'DELETE'
+  }, first.cookie);
+  assert.equal(removedExpense.response.status, 200);
+  assert.equal(removedExpense.body.id, editableExpense.body.id);
+  const expensesAfterRemoval = await request('/api/expenses', {}, first.cookie);
+  assert.equal(expensesAfterRemoval.body.some((item) => item.id === editableExpense.body.id), false);
+
+  const income = await request('/api/income', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'Freelance', amount: 125, date: new Date().toISOString().slice(0, 10) })
+  }, first.cookie);
+  assert.equal(income.response.status, 201);
+  assert.ok((await request('/api/income', {}, first.cookie)).body.some((item) => item.id === income.body.id));
+
+  const recurringIncome = await request('/api/recurring-income', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'Monthly salary', amount: 2500, day: Math.min(new Date().getDate(), 28) })
+  }, first.cookie);
+  assert.equal(recurringIncome.response.status, 201);
+  if (new Date().getDate() <= 28) {
+    assert.ok(recurringIncome.body.generatedIncome);
+    assert.ok((await request('/api/income', {}, first.cookie)).body.some((item) =>
+      item.id === recurringIncome.body.generatedIncome.id
+    ));
+  }
+
+  const budgetRule = await request('/api/budgets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ period: 'weekly', category: 'Food', amount: 200 })
+  }, first.cookie);
+  assert.equal(budgetRule.response.status, 201);
+  assert.equal((await request('/api/budgets', {}, first.cookie)).body[0].category, 'Food');
+  const invalidBudgetRule = await request('/api/budgets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ period: 'yearly', category: 'Food', amount: 200 })
+  }, first.cookie);
+  assert.equal(invalidBudgetRule.response.status, 400);
+
+  const goal = await request('/api/goals', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'Emergency fund', targetAmount: 1000 })
+  }, first.cookie);
+  assert.equal(goal.response.status, 201);
+  const contribution = await request(`/api/goals/${encodeURIComponent(goal.body.id)}/contributions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ amount: 75 })
+  }, first.cookie);
+  assert.equal(contribution.response.status, 200);
+  assert.equal(contribution.body.currentAmount, 75);
+
+  const reminder = await request('/api/reminders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: 'Electricity bill',
+      date: new Date().toISOString().slice(0, 10),
+      type: 'bill',
+      amount: 90
+    })
+  }, first.cookie);
+  assert.equal(reminder.response.status, 201);
+  assert.equal(reminder.body.amount, 90);
+  const noAmountReminder = await request('/api/reminders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: 'Custom reminder',
+      date: new Date().toISOString().slice(0, 10),
+      type: 'custom',
+      amount: null
+    })
+  }, first.cookie);
+  assert.equal(noAmountReminder.response.status, 201);
+  assert.equal(noAmountReminder.body.amount, null);
+  const zeroAmountReminder = await request('/api/reminders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: 'Invalid reminder',
+      date: new Date().toISOString().slice(0, 10),
+      type: 'bill',
+      amount: 0
+    })
+  }, first.cookie);
+  assert.equal(zeroAmountReminder.response.status, 400);
+  const invalidTypeReminder = await request('/api/reminders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      title: 'Invalid reminder',
+      date: new Date().toISOString().slice(0, 10),
+      type: 'unknown'
+    })
+  }, first.cookie);
+  assert.equal(invalidTypeReminder.response.status, 400);
+  const completedReminder = await request(`/api/reminders/${encodeURIComponent(reminder.body.id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ completed: true })
+  }, first.cookie);
+  assert.equal(completedReminder.body.completed, true);
+
   const second = await register('two@example.test', 'Two');
   assert.deepEqual((await request('/api/expenses', {}, second.cookie)).body, []);
-  assert.equal((await request('/api/expenses', {}, first.cookie)).body.length, 3);
+  assert.deepEqual((await request('/api/income', {}, second.cookie)).body, []);
+  assert.deepEqual((await request('/api/budgets', {}, second.cookie)).body, []);
+  assert.deepEqual((await request('/api/goals', {}, second.cookie)).body, []);
+  assert.deepEqual((await request('/api/reminders', {}, second.cookie)).body, []);
+  assert.equal((await request('/api/expenses', {}, first.cookie)).body.length, 3 + (todayDay <= 28 ? 1 : 0));
 
   const login = await request('/api/auth/login', {
     method: 'POST',
@@ -516,15 +675,16 @@ test('local development verification recovers legacy accounts and retains its MF
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ email, password })
   });
-  assert.deepEqual(login.body, { mfaRequired: true, setupRequired: true });
-  const challengeCookie = cookieFrom(login.response, 'spendwise_mfa_challenge');
-  const setup = await request(server, '/api/auth/mfa/setup', {}, challengeCookie);
+  assert.deepEqual(login.body, { mfaOptional: true });
+  const sessionCookie = cookieFrom(login.response, 'spendwise_session');
+  assert.equal((await request(server, '/api/auth/me', {}, sessionCookie)).response.status, 200);
+  const setup = await request(server, '/api/auth/mfa/setup', {}, sessionCookie);
   assert.equal(setup.response.status, 200);
   const mfaSetup = await request(server, '/api/auth/mfa/setup', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ code: testTotp(setup.body.secret) })
-  }, challengeCookie);
+  }, sessionCookie);
   assert.equal(mfaSetup.response.status, 200);
   assert.equal((await request(server, '/api/auth/me', {}, cookieFrom(mfaSetup.response, 'spendwise_session'))).response.status, 200);
 
@@ -587,4 +747,21 @@ test('local development verification cannot be enabled in production', async (t)
   });
   assert.equal(response.status, 503);
   assert.equal(fs.existsSync(path.join(dataDir, '.mfa-encryption-key')), false);
+});
+
+test('loadEnvFile parses key-value pairs into process.env without overriding existing keys', () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'spendwise-env-test-'));
+  const envPath = path.join(tempDir, '.env');
+  fs.writeFileSync(envPath, 'TEST_ENV_KEY_FOO="bar"\nTEST_ENV_KEY_BAZ=qux\n# Comment line\n');
+
+  process.env.TEST_ENV_KEY_FOO = 'preset';
+  try {
+    loadEnvFile(envPath);
+    assert.equal(process.env.TEST_ENV_KEY_FOO, 'preset');
+    assert.equal(process.env.TEST_ENV_KEY_BAZ, 'qux');
+  } finally {
+    delete process.env.TEST_ENV_KEY_FOO;
+    delete process.env.TEST_ENV_KEY_BAZ;
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });

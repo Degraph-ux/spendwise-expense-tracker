@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { SupabaseRelationalStorage, getSupabaseConfig } = require('./supabase');
 
 class JsonFileStorage {
   constructor(dataDir) {
@@ -95,11 +96,14 @@ class SupabaseDocumentStorage {
 function createStorage(options = {}) {
   if (options.storage) return options.storage;
   const dataDir = options.dataDir || process.env.SPENDWISE_DATA_DIR || path.join(__dirname, 'data');
-  const hasSupabaseConfig = Boolean(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY);
+  const hasSupabaseConfig = Boolean(
+    process.env.SUPABASE_URL &&
+    (process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_PUBLISHABLE_KEY)
+  );
   const explicitlySupabase = options.storageMode === 'supabase' || process.env.SPENDWISE_STORAGE === 'supabase';
 
   if (explicitlySupabase && !hasSupabaseConfig) {
-    throw new Error('Supabase storage requires SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.');
+    throw new Error('Supabase storage requires SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY).');
   }
   if (options.dataDir) {
     return new JsonFileStorage(dataDir);
@@ -111,13 +115,10 @@ function createStorage(options = {}) {
     return new JsonFileStorage(dataDir);
   }
   if (hasSupabaseConfig) {
-    return new SupabaseDocumentStorage({
-      url: process.env.SUPABASE_URL,
-      serviceRoleKey: process.env.SUPABASE_SERVICE_ROLE_KEY
-    });
+    return new SupabaseRelationalStorage({ config: getSupabaseConfig() });
   }
   if (process.env.NODE_ENV === 'production') {
-    throw new Error('Production requires Supabase storage. Configure SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.');
+    throw new Error('Production requires Supabase storage. Configure SUPABASE_URL and SUPABASE_ANON_KEY (or SUPABASE_PUBLISHABLE_KEY).');
   }
   return new JsonFileStorage(dataDir);
 }

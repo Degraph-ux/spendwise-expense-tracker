@@ -18,6 +18,9 @@ This week, SpendWise evolved from a static HTML/CSS layout into a fully interact
 - **Currency:** Choose a default currency in Settings to format budgets and expenses across the dashboard. This preference changes display formatting only; it does not convert saved amounts.
 - **Custom categories and recurring expenses:** Manage per-account categories and schedule expenses to be added automatically every month on a chosen day from 1 to 28.
 - **CSV export:** Download your account's expenses from the transaction history page.
+- **Financial planning:** Record one-time and recurring monthly income, set weekly or monthly category spending limits, track savings goals and contributions, and manage dated reminders. Planning data is isolated per account and stored by the configured JSON or Supabase backend.
+- **Reminder alerts:** The dashboard surfaces incomplete reminders due today or tomorrow when the account is opened. Background notifications and email/push reminders are not configured.
+- **Calendar integration:** Google Calendar synchronization is not implemented yet; reminders remain available inside SpendWise without granting calendar access.
 
 ## 🚧 Challenges Encountered
 One challenge was ensuring the page did not refresh when the "Add Expense" button was clicked inside the form. This was resolved by using `event.preventDefault()` inside the event listener to stop the default form submission behavior, allowing the JavaScript logic to execute smoothly.
@@ -25,35 +28,42 @@ One challenge was ensuring the page did not refresh when the "Add Expense" butto
 ## 🛠️ Tech Stack
 - **Frontend:** HTML5, CSS3, JavaScript (DOM Manipulation, Events, ES6)
 - **Design:** Custom modern UI with CSS Grid and Flexbox
+- **Brand system:** Urbanist typography; a black, white, and lime palette (`#D7FE03`, `#83AF3B`, `#F5F5F8`); and locally served Hugeicons SVGs.
+- **UI motion:** GSAP provides subtle authentication, page-transition, and mobile-menu animations. Animations are skipped when reduced motion is enabled.
 - **Version Control:** Git & GitHub
+
+The interface uses shared CSS tokens for brand colors, text, surfaces, borders, spacing, radii, and elevation. The dashboard adapts the references' spacious canvas, dark navigation rail, and quiet data cards to SpendWise's lime identity. Hugeicons are bundled into a same-origin SVG sprite so dashboard icons do not require a separate icon CDN. After changing the icon map, regenerate the sprite with `npm run build:icons`; the source icon package is a development dependency only.
 
 ## 🚀 Getting Started
 1. Clone or download this repository.
 2. Install the dependencies with `npm install`.
 3. Start the app with `npm start`.
 4. Open `http://localhost:3000` in your browser. The local server provides API access; opening `index.html` directly does not.
-5. For local development, create an account and continue directly to the dashboard. Email verification and MFA are disabled only when the development bypass below is enabled. Otherwise, configure SMTP and MFA before account creation.
+5. For local development, create an account and continue directly to the dashboard. Email verification is disabled only when the development bypass below is enabled. Otherwise, configure SMTP before account creation. Authenticator MFA is optional.
 
 ### Supabase backend configuration
 
-The backend uses Supabase Postgres for all persisted data when `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are configured. Account, session, MFA challenge, expense, settings, category, and recurring data are stored as private JSONB documents in `public.app_documents`; the browser never receives the service-role key. Local development without Supabase configured continues to use JSON files. Production startup requires Supabase configuration.
+New installations use Supabase Auth and relational Postgres tables protected by RLS. The Express server and existing vanilla-JavaScript interface are retained. The app uses user JWTs with the publishable/anon key for database operations; the service-role key is used only by the explicit one-time JSON migration command. Local development without Supabase configured continues to use JSON files. Production startup requires Supabase configuration.
 
-1. In the Supabase SQL Editor, run [`supabase/schema.sql`](./supabase/schema.sql).
-2. Set `SUPABASE_URL` to your project URL and `SUPABASE_SERVICE_ROLE_KEY` to a server-side service-role key. Never use the service-role key in browser code or commit it to the repository.
-3. If migrating an existing JSON installation, stop the app, set `SPENDWISE_DATA_DIR` to the existing data directory if it is not `./data`, then run `npm run migrate:supabase`. The import is repeatable and overwrites matching document keys; do not run it while users are making changes.
-4. Set `SPENDWISE_STORAGE=supabase` to explicitly require Supabase storage, then start the app with `npm start`.
+1. Apply every SQL file in [`supabase/migrations/`](./supabase/migrations/) in timestamp order using the Supabase SQL Editor. This creates the tables, indexes, triggers, RLS policies, system categories, and private `avatars` bucket, and applies later fixes. If you already ran the original schema migration, run any newer migration files that have not yet been applied.
+2. Set `SUPABASE_URL` and `SUPABASE_ANON_KEY` (or `SUPABASE_PUBLISHABLE_KEY`) in the server environment. Do not put a service-role key in browser code or commit any real credentials.
+3. Configure Supabase Auth email templates/SMTP and add the app root (for local development, `http://localhost:3000/`) to the allowed redirect URLs. Email verification is controlled by your Supabase Auth settings. Authenticator MFA is optional; users can set it up at sign-in or continue without it.
+4. To enable **Continue with Google** and **Continue with Microsoft**, open **Authentication → Sign In / Providers** in Supabase and enable Google and Azure (Microsoft). Create OAuth applications with Google Cloud and Microsoft Entra ID, and register Supabase's callback URL shown on the provider settings page (usually `https://<project-ref>.supabase.co/auth/v1/callback`) as each provider's redirect/callback URI. Enter each provider's client ID and client secret only in Supabase's provider settings. Add the app root URL to Supabase's redirect allow list as well. Microsoft sign-in requests the `email` scope. Users who enable TOTP MFA will be prompted to verify it on subsequent sign-ins.
+5. To retain local JSON data, stop the app and run `npm run migrate:supabase` to preview the import. Review the counts, then run `npm run migrate:supabase -- --apply`. The import is additive and idempotent per legacy account; it does not delete local files or existing database rows. It creates any missing Supabase Auth accounts with unknown random passwords, so those users must use **Forgot your password?** to set a new password. Existing scrypt hashes cannot be reused by Supabase Auth.
+6. Set `SPENDWISE_STORAGE=supabase` and start the app with `npm start`.
 
-The backend keeps the existing SpendWise email/password flow. Supabase is used as the backend database, not as the authentication provider.
-When importing existing accounts, keep the same `SPENDWISE_MFA_ENCRYPTION_KEY` used by the old server; otherwise saved authenticator secrets cannot be decrypted.
+The regular app process does not need `SUPABASE_SERVICE_ROLE_KEY`. The migration command does require it temporarily to map existing accounts by email and insert the legacy records; keep it only in a private environment and remove it after migration.
 
-For local development using Supabase, set these values in PowerShell before starting the server:
+For local development using Supabase, configure these values in the ignored `.env` file:
 
 ```powershell
 $env:SUPABASE_URL = "https://your-project.supabase.co"
-$env:SUPABASE_SERVICE_ROLE_KEY = "your-server-side-service-role-key"
+$env:SUPABASE_ANON_KEY = "your-publishable-or-anon-key"
 $env:SPENDWISE_STORAGE = "supabase"
 npm start
 ```
+
+`SUPABASE_SERVICE_ROLE_KEY` is only needed when running the migration script above. Supabase email-confirmation and password-recovery links return to the app root; add that exact origin to the Supabase Auth redirect allowlist.
 
 ### Local development authentication bypass
 
@@ -66,9 +76,21 @@ $env:SPENDWISE_DEV_SKIP_EMAIL_MFA = "true"
 npm start
 ```
 
+Alternatively, configure these in a `.env` file in the project root (see `.env.example`). The server loads `.env` automatically on startup:
+
+```env
+PORT=3000
+SPENDWISE_APP_URL=http://localhost:3000
+SPENDWISE_DEV_AUTH=true
+SPENDWISE_DEV_SKIP_EMAIL_MFA=true
+SPENDWISE_MFA_ENCRYPTION_KEY=replace-with-a-random-secret
+```
+
+Generate a unique key with `node -e "console.log(require('node:crypto').randomBytes(32).toString('base64'))"` and keep it private.
+
 ### Production email verification and MFA configuration
 
-When the development bypass is off, email verification and authenticator MFA are required for every account:
+When the development bypass is off, email verification follows your configured email-auth flow. Authenticator MFA is optional; users who enable it must complete the challenge on subsequent sign-ins:
 
 Passwords must be 8–128 characters; a longer passphrase is recommended.
 

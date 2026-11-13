@@ -5,9 +5,11 @@ const crypto = require('crypto');
 const { promisify } = require('util');
 const nodemailer = require('nodemailer');
 const { createStorage } = require('./storage');
+const { SupabaseRelationalStorage, createSupabaseClient } = require('./supabase');
 
 const scrypt = promisify(crypto.scrypt);
 const SESSION_COOKIE = 'spendwise_session';
+const REFRESH_COOKIE = 'spendwise_refresh';
 const MFA_CHALLENGE_COOKIE = 'spendwise_mfa_challenge';
 const SESSION_LIFETIME = 7 * 24 * 60 * 60 * 1000;
 const MFA_CHALLENGE_LIFETIME = 5 * 60 * 1000;
@@ -166,6 +168,15 @@ function validDate(value) {
   return Boolean(parseDateString(value));
 }
 
+function moneyToCents(value) {
+  const amount = Number(value);
+  return Number.isFinite(amount) ? Math.round(amount * 100) : 0;
+}
+
+function addMoney(left, right) {
+  return (moneyToCents(left) + moneyToCents(right)) / 100;
+}
+
 function csvCell(value) {
   let text = String(value ?? '');
   if (/^\s*[=+\-@]/.test(text)) text = `'${text}`;
@@ -176,6 +187,8 @@ function createApp(options = {}) {
   const app = express();
   const dataDir = options.dataDir || process.env.SPENDWISE_DATA_DIR || path.join(__dirname, 'data');
   const storage = createStorage(options);
+  const supabaseStorage = storage instanceof SupabaseRelationalStorage;
+  const supabaseClientFactory = options.supabaseClientFactory || createSupabaseClient;
   const usersKey = 'users.json';
   const sessionsKey = 'sessions.json';
   const challengesKey = 'mfa-challenges.json';
@@ -250,6 +263,11 @@ function createApp(options = {}) {
     });
     await writeUserFile(userId, 'categories.json', []);
     await writeUserFile(userId, 'recurring.json', []);
+    await writeUserFile(userId, 'income.json', []);
+    await writeUserFile(userId, 'recurring-income.json', []);
+    await writeUserFile(userId, 'budgets.json', []);
+    await writeUserFile(userId, 'goals.json', []);
+    await writeUserFile(userId, 'reminders.json', []);
   }
 
   function publicUser(user) {
@@ -339,14 +357,91 @@ function createApp(options = {}) {
     });
   }
 
+  function setSupabaseSessionCookies(response, session) {
+    const cookieOptions = {
+      httpOnly: true,
+      sameSite: 'strict',
+      secure: secureCookies,
+      path: '/'
+    };
+    response.cookie(SESSION_COOKIE, session.access_token, {
+      ...cookieOptions,
+      maxAge: Math.min(Number(session.expires_in) || 3600, SESSION_LIFETIME / 1000) * 1000
+    });
+    response.cookie(REFRESH_COOKIE, session.refresh_token, {
+      ...cookieOptions,
+      maxAge: SESSION_LIFETIME
+    });
+  }
+
+  function clearSupabaseSessionCookies(response) {
+    const cookieOptions = { httpOnly: true, sameSite: 'strict', secure: secureCookies, path: '/' };
+    response.clearCookie(SESSION_COOKIE, cookieOptions);
+    response.clearCookie(REFRESH_COOKIE, cookieOptions);
+  }
+
+  async function getSupabaseSession(request, response) {
+    const accessToken = readCookie(request, SESSION_COOKIE);
+    const refreshToken = readCookie(request, REFRESH_COOKIE);
+    if (!accessToken || !refreshToken || !supabaseStorage) return null;
+
+    const client = supabaseClientFactory(supabaseStorage.config);
+    let result = await client.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+    if (result.error || !result.data.session) {
+      result = await client.auth.refreshSession({ refresh_token: refreshToken });
+    }
+    if (result.error || !result.data.session) {
+      clearSupabaseSessionCookies(response);
+      return null;
+    }
+
+    const session = result.data.session;
+    const userResult = await client.auth.getUser(session.access_token);
+    if (userResult.error || !userResult.data.user) {
+      clearSupabaseSessionCookies(response);
+      return null;
+    }
+    if (session.access_token !== accessToken || session.refresh_token !== refreshToken) {
+      setSupabaseSessionCookies(response, session);
+    }
+    return { client, session, user: userResult.data.user };
+  }
+
+  function publicSupabaseUser(user) {
+    return { id: user.id, email: user.email };
+  }
+
+  function supabaseAuthError(error, statusCode = 400) {
+    const authError = new Error(error?.message || 'Supabase authentication failed.');
+    authError.statusCode = error?.status || statusCode;
+    authError.expose = true;
+    return authError;
+  }
+
+  async function setSessionFromAuthResult(response, client, result) {
+    if (result.error) throw supabaseAuthError(result.error);
+    const session = result.data?.session || result.data;
+    if (!session?.access_token || !session?.refresh_token) {
+      throw new Error('Supabase did not return a valid authentication session.');
+    }
+    const { error } = await client.auth.setSession({
+      access_token: session.access_token,
+      refresh_token: session.refresh_token
+    });
+    if (error) throw supabaseAuthError(error, 401);
+    const { data: current } = await client.auth.getSession();
+    const savedSession = current.session || session;
+    setSupabaseSessionCookies(response, savedSession);
+    return savedSession;
+  }
+
   async function createSession(userId) {
     const now = Date.now();
     const users = await storage.read(usersKey, []);
     const sessions = (await storage.read(sessionsKey, [])).filter((item) => {
       const user = users.find((existingUser) => existingUser.id === item.userId);
       return item.expiresAt > now && user?.emailVerifiedAt &&
-        (developmentSkipEmailMfaEnabled ||
-          (user?.mfaEnabledAt && item.mfaVerifiedAt >= user.mfaEnabledAt));
+        (!user?.mfaEnabledAt || item.mfaVerifiedAt >= user.mfaEnabledAt);
     });
     const token = crypto.randomBytes(32).toString('base64url');
     const expiresAt = now + SESSION_LIFETIME;
@@ -431,19 +526,36 @@ function createApp(options = {}) {
 
     const user = (await storage.read(usersKey, [])).find((item) => item.id === session.userId);
     return user && user.emailVerifiedAt &&
-      (developmentSkipEmailMfaEnabled ||
-        (user.mfaEnabledAt && session.mfaVerifiedAt >= user.mfaEnabledAt))
+      (!user.mfaEnabledAt || session.mfaVerifiedAt >= user.mfaEnabledAt)
       ? { tokenHash, user }
       : null;
   }
 
   async function requireAuth(request, response, next) {
     try {
+      if (supabaseStorage) {
+        const auth = await getSupabaseSession(request, response);
+        if (!auth) {
+          clearSupabaseSessionCookies(response);
+          return response.status(401).json({ error: 'Your session expired. Please sign in again.' });
+        }
+        const { data: aal, error: aalError } =
+          await auth.client.auth.mfa.getAuthenticatorAssuranceLevel(auth.session.access_token);
+        if (aalError) throw supabaseAuthError(aalError, 401);
+        const { data: factors, error: factorsError } = await auth.client.auth.mfa.listFactors();
+        if (factorsError) throw supabaseAuthError(factorsError, 401);
+        const verifiedFactors = factors.all.filter((factor) => factor.status === 'verified');
+        if (verifiedFactors.length && aal.nextLevel === 'aal2' && aal.currentLevel !== 'aal2') {
+          return response.status(401).json({ error: 'Complete multi-factor sign-in to continue.' });
+        }
+        request.authUser = auth.user;
+        request.supabaseAuth = auth;
+        return storage.runWithUser(auth.session.access_token, auth.user.id, next);
+      }
       const session = await currentSession(request);
-      if (!session || !session.user.emailVerifiedAt ||
-          (!developmentSkipEmailMfaEnabled && !session.user.mfaEnabledAt)) {
+      if (!session || !session.user.emailVerifiedAt) {
         response.clearCookie(SESSION_COOKIE, { httpOnly: true, sameSite: 'strict', secure: secureCookies, path: '/' });
-        return response.status(401).json({ error: 'Please complete email verification and multi-factor sign-in.' });
+        return response.status(401).json({ error: 'Please verify your email address and sign in.' });
       }
       request.authUser = session.user;
       request.sessionTokenHash = session.tokenHash;
@@ -469,14 +581,47 @@ function createApp(options = {}) {
     return [...builtInCategories, ...await readUserFile(userId, 'categories.json', [])];
   }
 
+  function invalidInput(message) {
+    const error = new Error(message);
+    error.statusCode = 400;
+    return error;
+  }
+
+  function validateMoney(value, fieldName = 'Amount') {
+    const text = String(value ?? '').trim();
+    if (!/^\d+(?:\.\d{1,2})?$/.test(text)) {
+      throw invalidInput(`${fieldName} must be a positive amount with no more than two decimal places.`);
+    }
+    const [whole, fraction = ''] = text.split('.');
+    const cents = Number(whole) * 100 + Number(fraction.padEnd(2, '0'));
+    if (!Number.isSafeInteger(cents) || cents <= 0 || cents > 100_000_000_000) {
+      throw invalidInput(`${fieldName} must be greater than zero and no more than 1,000,000,000.`);
+    }
+    return cents / 100;
+  }
+
+  function validateName(value, fieldName = 'Name', maxLength = 80) {
+    const name = String(value || '').trim();
+    if (!name || name.length > maxLength) {
+      throw invalidInput(`${fieldName} is required and must be ${maxLength} characters or fewer.`);
+    }
+    return name;
+  }
+
+  function validateReminderDate(value) {
+    const date = String(value || '').trim();
+    if (!validDate(date)) throw invalidInput('Enter a valid reminder date.');
+    return date;
+  }
+
   function validateExpense(payload, categories) {
     const name = String(payload.name || '').trim();
-    const amount = Number(payload.amount);
+    const amount = validateMoney(payload.amount);
     const date = String(payload.date || '').trim();
     const category = String(payload.category || 'Other').trim();
     const description = String(payload.description || '').trim();
 
-    if (!name || name.length > 80 || !Number.isFinite(amount) || amount <= 0 || amount > 1_000_000_000 || !validDate(date)) {
+    if (!name || name.length > 80 || !validDate(date)) {
       const error = new Error('Please enter a name, a positive amount, and a valid date.');
       error.statusCode = 400;
       throw error;
@@ -500,6 +645,9 @@ function createApp(options = {}) {
     const today = localDateISO(new Date());
     let expensesChanged = false;
     let recurringChanged = false;
+    const recurringExpenseKeys = new Set(expenses
+      .filter((expense) => expense.recurringId && expense.recurringDate)
+      .map((expense) => `${expense.recurringId}:${expense.recurringDate}`));
 
     recurring.forEach((schedule) => {
       let generatedCount = 0;
@@ -507,10 +655,8 @@ function createApp(options = {}) {
         if (generatedCount >= 1200) {
           throw new Error('A recurring schedule is too far behind to process safely.');
         }
-        const alreadyCreated = expenses.some((expense) =>
-          expense.recurringId === schedule.id && expense.recurringDate === schedule.nextRunDate
-        );
-        if (!alreadyCreated) {
+        const expenseKey = `${schedule.id}:${schedule.nextRunDate}`;
+        if (!recurringExpenseKeys.has(expenseKey)) {
           expenses.push({
             id: crypto.randomUUID(),
             name: schedule.name,
@@ -521,6 +667,7 @@ function createApp(options = {}) {
             recurringId: schedule.id,
             recurringDate: schedule.nextRunDate
           });
+          recurringExpenseKeys.add(expenseKey);
           expensesChanged = true;
         }
         schedule.nextRunDate = addMonth(schedule.nextRunDate);
@@ -531,6 +678,48 @@ function createApp(options = {}) {
 
     if (expensesChanged) await writeUserFile(userId, 'expenses.json', expenses);
     if (recurringChanged) await writeUserFile(userId, 'recurring.json', recurring);
+    return { expenses, recurring };
+  }
+
+  async function processDueRecurringIncome(userId) {
+    const schedules = await readUserFile(userId, 'recurring-income.json', []);
+    const incomes = await readUserFile(userId, 'income.json', []);
+    const today = localDateISO(new Date());
+    let incomesChanged = false;
+    let schedulesChanged = false;
+    const generatedKeys = new Set(incomes
+      .filter((income) => income.recurringId && income.recurringDate)
+      .map((income) => `${income.recurringId}:${income.recurringDate}`));
+
+    schedules.forEach((schedule) => {
+      let generatedCount = 0;
+      while (schedule.active && schedule.nextRunDate <= today) {
+        if (generatedCount >= 1200) {
+          throw new Error('A recurring income schedule is too far behind to process safely.');
+        }
+        const key = `${schedule.id}:${schedule.nextRunDate}`;
+        if (!generatedKeys.has(key)) {
+          incomes.push({
+            id: crypto.randomUUID(),
+            name: schedule.name,
+            amount: schedule.amount,
+            date: schedule.nextRunDate,
+            description: schedule.description,
+            recurringId: schedule.id,
+            recurringDate: schedule.nextRunDate
+          });
+          generatedKeys.add(key);
+          incomesChanged = true;
+        }
+        schedule.nextRunDate = addMonth(schedule.nextRunDate);
+        schedulesChanged = true;
+        generatedCount += 1;
+      }
+    });
+
+    if (incomesChanged) await writeUserFile(userId, 'income.json', incomes);
+    if (schedulesChanged) await writeUserFile(userId, 'recurring-income.json', schedules);
+    return { incomes, schedules };
   }
 
   app.use(express.json({ limit: '32kb' }));
@@ -540,6 +729,387 @@ function createApp(options = {}) {
     if (!developmentSkipEmailMfaEnabled || isLoopbackRequest(request)) return next();
     response.status(403).json({ error: 'The local development authentication bypass only accepts localhost connections.' });
   });
+
+  if (supabaseStorage) {
+    const redirectUrl = new URL('/', appUrl).toString();
+
+    app.post('/api/auth/oauth', applyLoginLimit, async (request, response, next) => {
+      try {
+        const provider = String(request.body?.provider || '').toLowerCase();
+        const providerConfig = {
+          google: { provider: 'google' },
+          microsoft: { provider: 'azure', scopes: 'email' }
+        }[provider];
+        if (!providerConfig) {
+          return response.status(400).json({ error: 'Choose Google or Microsoft to continue.' });
+        }
+
+        const client = supabaseClientFactory(supabaseStorage.config);
+        const { data, error } = await client.auth.signInWithOAuth({
+          provider: providerConfig.provider,
+          options: {
+            redirectTo: redirectUrl,
+            skipBrowserRedirect: true,
+            ...(providerConfig.scopes ? { scopes: providerConfig.scopes } : {})
+          }
+        });
+        if (error) throw supabaseAuthError(error);
+        if (!data?.url) throw new Error('Supabase did not return an OAuth sign-in URL.');
+        response.json({ url: data.url });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post('/api/auth/register', applyLoginLimit, async (request, response, next) => {
+      try {
+        const email = String(request.body?.email || '').trim().toLowerCase();
+        const displayName = String(request.body?.displayName || '').trim();
+        const password = String(request.body?.password || '');
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+          return response.status(400).json({ error: 'Enter a valid email address.' });
+        }
+        if (!displayName || displayName.length > 60) {
+          return response.status(400).json({ error: 'Enter a display name of 60 characters or fewer.' });
+        }
+        if (password.length < PASSWORD_MIN_LENGTH || password.length > 128) {
+          return response.status(400).json({ error: `Use a password between ${PASSWORD_MIN_LENGTH} and 128 characters.` });
+        }
+
+        const client = supabaseClientFactory(supabaseStorage.config);
+        const result = await client.auth.signUp({
+          email,
+          password,
+          options: {
+            data: { full_name: displayName },
+            emailRedirectTo: redirectUrl
+          }
+        });
+        if (result.error) throw supabaseAuthError(result.error);
+        if (!result.data.session) {
+          return response.status(201).json({
+            message: 'Check your email for a verification link to finish creating your account.',
+            verificationDelivery: 'email'
+          });
+        }
+
+        const session = await setSessionFromAuthResult(response, client, result);
+        response.status(201).json({
+          user: publicSupabaseUser(session.user),
+          authenticated: true,
+          mfaOptional: true
+        });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post('/api/auth/login', applyLoginLimit, async (request, response, next) => {
+      try {
+        const email = String(request.body?.email || '').trim().toLowerCase();
+        const password = String(request.body?.password || '');
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || password.length > 128) {
+          return response.status(400).json({ error: 'Enter a valid email address and password.' });
+        }
+        const client = supabaseClientFactory(supabaseStorage.config);
+        const result = await client.auth.signInWithPassword({ email, password });
+        if (result.error) {
+          const message = result.error.code === 'email_not_confirmed'
+            ? 'Verify your email address before signing in. Use the resend button if you need a new link.'
+            : 'Email or password is incorrect.';
+          return response.status(result.error.code === 'email_not_confirmed' ? 403 : 401).json({ error: message });
+        }
+        await setSessionFromAuthResult(response, client, result);
+        const { data: factors, error: factorError } = await client.auth.mfa.listFactors();
+        if (factorError) throw supabaseAuthError(factorError);
+        const verifiedTotp = factors.totp.some((factor) => factor.status === 'verified');
+        if (!verifiedTotp) {
+          return response.json({ mfaOptional: true });
+        }
+        response.json({ mfaRequired: true, setupRequired: false });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post('/api/auth/resend-verification', applyLoginLimit, async (request, response, next) => {
+      try {
+        const email = String(request.body?.email || '').trim().toLowerCase();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+          return response.status(400).json({ error: 'Enter a valid email address.' });
+        }
+        const client = supabaseClientFactory(supabaseStorage.config);
+        const { error } = await client.auth.resend({
+          type: 'signup',
+          email,
+          options: { emailRedirectTo: redirectUrl }
+        });
+        if (error) throw supabaseAuthError(error);
+        response.status(202).json({
+          message: 'If that account needs verification, a verification email will be sent.',
+          verificationDelivery: 'email'
+        });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post('/api/auth/password-reset', applyLoginLimit, async (request, response, next) => {
+      try {
+        const email = String(request.body?.email || '').trim().toLowerCase();
+        if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) {
+          return response.status(400).json({ error: 'Enter a valid email address.' });
+        }
+        const client = supabaseClientFactory(supabaseStorage.config);
+        const { error } = await client.auth.resetPasswordForEmail(email, { redirectTo: redirectUrl });
+        if (error) throw supabaseAuthError(error);
+        response.status(202).json({ message: 'If that account exists, a password reset email will be sent.' });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post('/api/auth/session', async (request, response, next) => {
+      try {
+        const accessToken = String(request.body?.access_token || '');
+        const refreshToken = String(request.body?.refresh_token || '');
+        const flowType = String(request.body?.type || '');
+        if (!accessToken || accessToken.length > 8192 || !refreshToken || refreshToken.length > 2048) {
+          return response.status(400).json({ error: 'The authentication link is invalid or expired.' });
+        }
+        const client = supabaseClientFactory(supabaseStorage.config);
+        const result = await setSessionFromAuthResult(response, client, {
+          data: { session: { access_token: accessToken, refresh_token: refreshToken } }
+        });
+        if (flowType === 'recovery') {
+          return response.json({ passwordRecovery: true });
+        }
+        const { data: factors, error } = await client.auth.mfa.listFactors();
+        if (error) throw supabaseAuthError(error);
+        const mfaEnabled = factors.totp.some((factor) => factor.status === 'verified');
+        response.json({
+          authenticated: true,
+          ...(mfaEnabled
+            ? { mfaRequired: true, setupRequired: false }
+            : { mfaOptional: true }),
+          user: publicSupabaseUser(result.user)
+        });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post('/api/auth/password', async (request, response, next) => {
+      try {
+        const auth = await getSupabaseSession(request, response);
+        if (!auth) return response.status(401).json({ error: 'Your password reset session expired. Request a new link.' });
+        const password = String(request.body?.password || '');
+        if (password.length < PASSWORD_MIN_LENGTH || password.length > 128) {
+          return response.status(400).json({ error: `Use a password between ${PASSWORD_MIN_LENGTH} and 128 characters.` });
+        }
+        const { error } = await auth.client.auth.updateUser({ password });
+        if (error) throw supabaseAuthError(error);
+        response.json({ message: 'Your password has been updated. Sign in with your new password.' });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post('/api/auth/logout', async (request, response, next) => {
+      try {
+        const auth = await getSupabaseSession(request, response);
+        if (auth) {
+          const { error } = await auth.client.auth.signOut({ scope: 'local' });
+          if (error) throw supabaseAuthError(error, 502);
+        }
+        clearSupabaseSessionCookies(response);
+        clearMfaChallengeCookie(response);
+        response.json({ success: true });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get('/api/auth/mfa/setup', async (request, response, next) => {
+      try {
+        const auth = await getSupabaseSession(request, response);
+        if (!auth) return response.status(401).json({ error: 'Your sign-in session expired. Please sign in again.' });
+        const { data: factors, error: factorsError } = await auth.client.auth.mfa.listFactors();
+        if (factorsError) throw supabaseAuthError(factorsError);
+        if (factors.totp.some((factor) => factor.status === 'verified')) {
+          return response.status(409).json({ error: 'Multi-factor authentication is already set up.' });
+        }
+        const { data, error } = await auth.client.auth.mfa.enroll({
+          factorType: 'totp',
+          friendlyName: 'SpendWise authenticator'
+        });
+        if (error) throw supabaseAuthError(error);
+        response.json({ factorId: data.id, secret: data.totp.secret, otpauthUrl: data.totp.uri });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post('/api/auth/mfa/setup', async (request, response, next) => {
+      try {
+        const auth = await getSupabaseSession(request, response);
+        if (!auth) return response.status(401).json({ error: 'Your sign-in session expired. Please sign in again.' });
+        const factorId = String(request.body?.factorId || '');
+        const code = String(request.body?.code || '').trim();
+        if (!/^[0-9a-f-]{36}$/i.test(factorId) || !/^\d{6}$/.test(code)) {
+          return response.status(400).json({ error: 'Enter the 6-digit authenticator code.' });
+        }
+        const result = await auth.client.auth.mfa.challengeAndVerify({ factorId, code });
+        const session = await setSessionFromAuthResult(response, auth.client, result);
+        const recoveryResult = await auth.client.auth.mfa.recoveryCodes.generate({
+          friendlyName: 'SpendWise recovery codes'
+        });
+        if (recoveryResult.error) throw supabaseAuthError(recoveryResult.error, 503);
+        response.json({
+          user: publicSupabaseUser(session.user),
+          recoveryCodes: recoveryResult.data.codes
+        });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post('/api/auth/mfa/verify', async (request, response, next) => {
+      try {
+        const auth = await getSupabaseSession(request, response);
+        if (!auth) return response.status(401).json({ error: 'Your sign-in session expired. Please sign in again.' });
+        const code = String(request.body?.code || '').trim();
+        let result;
+        if (/^\d{6}$/.test(code)) {
+          const { data: factors, error } = await auth.client.auth.mfa.listFactors();
+          if (error) throw supabaseAuthError(error);
+          const factor = factors.totp.find((item) => item.status === 'verified');
+          if (!factor) return response.status(409).json({ error: 'Set up an authenticator before signing in.' });
+          result = await auth.client.auth.mfa.challengeAndVerify({ factorId: factor.id, code });
+        } else {
+          result = await auth.client.auth.mfa.recoveryCodes.verify({ code });
+        }
+        const session = await setSessionFromAuthResult(response, auth.client, result);
+        response.json({ user: publicSupabaseUser(session.user) });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.get('/api/profile/avatar', requireAuth, async (request, response, next) => {
+      try {
+        const { data: profile, error } = await request.supabaseAuth.client.from('profiles')
+          .select('avatar_url')
+          .eq('id', request.authUser.id)
+          .maybeSingle();
+        if (error) throw supabaseAuthError(error);
+        if (!profile?.avatar_url) return response.json({ url: null });
+        const { data, error: signingError } = await request.supabaseAuth.client.storage
+          .from('avatars')
+          .createSignedUrl(profile.avatar_url, 3600);
+        if (signingError) throw supabaseAuthError(signingError);
+        response.json({ url: data.signedUrl });
+      } catch (error) {
+        next(error);
+      }
+    });
+
+    app.post(
+      '/api/profile/avatar',
+      express.raw({ type: ['image/jpeg', 'image/png', 'image/webp'], limit: '5mb' }),
+      requireAuth,
+      async (request, response, next) => {
+        try {
+          const contentType = String(request.headers['content-type'] || '').split(';')[0].toLowerCase();
+          const image = request.body;
+          if (!Buffer.isBuffer(image) || !image.length) {
+            return response.status(400).json({ error: 'Choose a JPEG, PNG, or WebP profile picture.' });
+          }
+          const validImage = contentType === 'image/png'
+            ? image.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
+            : contentType === 'image/jpeg'
+              ? image[0] === 0xff && image[1] === 0xd8 && image[2] === 0xff
+              : contentType === 'image/webp'
+                ? image.toString('ascii', 0, 4) === 'RIFF' && image.toString('ascii', 8, 12) === 'WEBP'
+                : false;
+          if (!validImage) {
+            return response.status(400).json({ error: 'The uploaded file does not match a supported image format.' });
+          }
+
+          const extension = { 'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp' }[contentType];
+          const objectPath = `${request.authUser.id}/${crypto.randomUUID()}.${extension}`;
+          const { error: uploadError } = await request.supabaseAuth.client.storage
+            .from('avatars')
+            .upload(objectPath, image, { contentType, cacheControl: '3600', upsert: false });
+          if (uploadError) throw supabaseAuthError(uploadError);
+          const { data: updatedProfile, error: profileError } = await request.supabaseAuth.client
+            .from('profiles')
+            .update({ avatar_url: objectPath })
+            .eq('id', request.authUser.id)
+            .select('id')
+            .maybeSingle();
+          if (profileError) throw supabaseAuthError(profileError);
+          if (!updatedProfile) throw new Error('The authenticated profile could not be found.');
+          const { data, error: signingError } = await request.supabaseAuth.client.storage
+            .from('avatars')
+            .createSignedUrl(objectPath, 3600);
+          if (signingError) throw supabaseAuthError(signingError);
+          response.status(201).json({ url: data.signedUrl });
+        } catch (error) {
+          next(error);
+        }
+      }
+    );
+
+    app.get('/api/realtime', requireAuth, (request, response) => {
+      const client = request.supabaseAuth.client;
+      const userId = request.authUser.id;
+      response.status(200).set({
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache, no-transform',
+        Connection: 'keep-alive',
+        'X-Accel-Buffering': 'no'
+      });
+      response.flushHeaders();
+      response.write(': connected\n\n');
+
+      const send = (payload) => {
+        if (!response.writableEnded && !response.destroyed) {
+          response.write(`data: ${JSON.stringify(payload)}\n\n`);
+        }
+      };
+      const tables = [
+        'expenses', 'categories', 'budgets', 'savings_goals', 'income_entries',
+        'recurring_expenses', 'recurring_income', 'reminders'
+      ];
+      client.realtime.setAuth(request.supabaseAuth.session.access_token);
+      const channel = client.channel(`spendwise-${userId}`);
+      for (const table of tables) {
+        channel.on('postgres_changes', {
+          event: '*',
+          schema: 'public',
+          table,
+          filter: `user_id=eq.${userId}`
+        }, () => send({ table }));
+      }
+      channel.subscribe((status, error) => {
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          console.error('Supabase Realtime subscription failed:', error || status);
+          send({ error: 'realtime_unavailable' });
+        }
+      });
+
+      const heartbeat = setInterval(() => {
+        if (!response.writableEnded && !response.destroyed) response.write(': keep-alive\n\n');
+      }, 25_000);
+      response.on('close', () => {
+        clearInterval(heartbeat);
+        client.removeChannel(channel).catch((error) => {
+          console.error('Could not close the Supabase Realtime channel:', error);
+        });
+      });
+    });
+  }
 
   app.post('/api/auth/register', applyLoginLimit, async (request, response, next) => {
     try {
@@ -668,7 +1238,7 @@ function createApp(options = {}) {
       delete user.verificationTokenHash;
       delete user.verificationExpiresAt;
       await storage.write(usersKey, users);
-      response.json({ message: 'Email verified. You can now sign in to set up multi-factor authentication.' });
+      response.json({ message: 'Email verified. You can now sign in to your account.' });
     } catch (error) {
       next(error);
     }
@@ -691,10 +1261,6 @@ function createApp(options = {}) {
       if (!developmentSkipEmailMfaEnabled && !user.emailVerifiedAt) {
         return response.status(403).json({ error: 'Verify your email address before signing in. Use the resend button if you need a new link.' });
       }
-      if (!developmentSkipEmailMfaEnabled && !mfaKeyAvailable()) {
-        return response.status(503).json({ error: 'Multi-factor authentication encryption is not configured. Set SPENDWISE_MFA_ENCRYPTION_KEY to a secret of at least 32 characters.' });
-      }
-
       if (developmentSkipEmailMfaEnabled) {
         const users = await storage.read(usersKey, []);
         const currentUser = users.find((item) => item.id === user.id);
@@ -708,16 +1274,22 @@ function createApp(options = {}) {
       if (existingSession) {
         await storage.write(sessionsKey, (await storage.read(sessionsKey, [])).filter((item) => item.tokenHash !== existingSession.tokenHash));
       }
-      response.clearCookie(SESSION_COOKIE, { httpOnly: true, sameSite: 'strict', secure: secureCookies, path: '/' });
       if (developmentSkipEmailMfaEnabled) {
         clearMfaChallengeCookie(response);
         setSessionCookie(response, await createSession(user.id));
         response.json({ user: publicUser(user) });
         return;
       }
+      if (!user.mfaEnabledAt) {
+        clearMfaChallengeCookie(response);
+        setSessionCookie(response, await createSession(user.id));
+        response.json({ mfaOptional: true });
+        return;
+      }
+      response.clearCookie(SESSION_COOKIE, { httpOnly: true, sameSite: 'strict', secure: secureCookies, path: '/' });
       const challengeToken = await createMfaChallenge(user.id);
       setMfaChallengeCookie(response, challengeToken);
-      response.json({ mfaRequired: true, setupRequired: !user.mfaEnabledAt });
+      response.json({ mfaRequired: true, setupRequired: false });
     } catch (error) {
       next(error);
     }
@@ -726,13 +1298,16 @@ function createApp(options = {}) {
   app.get('/api/auth/mfa/setup', async (request, response, next) => {
     try {
       const challenge = await currentMfaChallenge(request);
-      if (!challenge) return response.status(401).json({ error: 'Your sign-in challenge expired. Please sign in again.' });
-      if (challenge.user.mfaEnabledAt) return response.status(409).json({ error: 'Multi-factor authentication is already set up.' });
+      const session = challenge ? null : await currentSession(request);
+      const userId = challenge?.user.id || session?.user.id;
+      if (!userId) return response.status(401).json({ error: 'Your sign-in session expired. Please sign in again.' });
+      const users = await storage.read(usersKey, []);
+      const user = users.find((item) => item.id === userId);
+      if (!user) return response.status(401).json({ error: 'Your account could not be found. Please sign in again.' });
+      if (user.mfaEnabledAt) return response.status(409).json({ error: 'Multi-factor authentication is already set up.' });
       if (!mfaKeyAvailable()) {
         return response.status(503).json({ error: 'Multi-factor authentication encryption is not configured. Set SPENDWISE_MFA_ENCRYPTION_KEY to a secret of at least 32 characters.' });
       }
-      const users = await storage.read(usersKey, []);
-      const user = users.find((item) => item.id === challenge.user.id);
       if (!user.mfaPendingSecretEncrypted) {
         const secret = base32Encode(crypto.randomBytes(20));
         user.mfaPendingSecretEncrypted = encryptMfaSecret(secret, mfaEncryptionKey);
@@ -752,20 +1327,26 @@ function createApp(options = {}) {
   app.post('/api/auth/mfa/setup', async (request, response, next) => {
     try {
       const challenge = await currentMfaChallenge(request);
-      if (!challenge) return response.status(401).json({ error: 'Your sign-in challenge expired. Please sign in again.' });
-      if (challenge.user.mfaEnabledAt) return response.status(409).json({ error: 'Multi-factor authentication is already set up.' });
+      const session = challenge ? null : await currentSession(request);
+      const userId = challenge?.user.id || session?.user.id;
+      if (!userId) return response.status(401).json({ error: 'Your sign-in session expired. Please sign in again.' });
+      const users = await storage.read(usersKey, []);
+      const user = users.find((item) => item.id === userId);
+      if (!user) return response.status(401).json({ error: 'Your account could not be found. Please sign in again.' });
+      if (user.mfaEnabledAt) return response.status(409).json({ error: 'Multi-factor authentication is already set up.' });
       if (!mfaKeyAvailable()) {
         return response.status(503).json({ error: 'Multi-factor authentication encryption is not configured. Set SPENDWISE_MFA_ENCRYPTION_KEY to a secret of at least 32 characters.' });
       }
-      if (!challenge.user.mfaPendingSecretEncrypted) {
+      if (!user.mfaPendingSecretEncrypted) {
         return response.status(400).json({ error: 'Start multi-factor setup again to get a new authenticator key.' });
       }
-      const secret = decryptMfaSecret(challenge.user.mfaPendingSecretEncrypted, mfaEncryptionKey);
+      const secret = decryptMfaSecret(user.mfaPendingSecretEncrypted, mfaEncryptionKey);
       const counter = totpCounter(secret, request.body?.code);
-      if (counter === null) return await failMfaChallenge(challenge.tokenHash, response);
+      if (counter === null) {
+        if (challenge) return await failMfaChallenge(challenge.tokenHash, response);
+        return response.status(401).json({ error: 'That authenticator code is not valid.' });
+      }
 
-      const users = await storage.read(usersKey, []);
-      const user = users.find((item) => item.id === challenge.user.id);
       user.mfaSecretEncrypted = user.mfaPendingSecretEncrypted;
       delete user.mfaPendingSecretEncrypted;
       user.mfaEnabledAt = Date.now();
@@ -774,8 +1355,10 @@ function createApp(options = {}) {
       user.recoveryCodeHashes = recoveryCodes.map(hashToken);
       await storage.write(usersKey, users);
 
-      await clearMfaChallenge(challenge.tokenHash);
-      clearMfaChallengeCookie(response);
+      if (challenge) {
+        await clearMfaChallenge(challenge.tokenHash);
+        clearMfaChallengeCookie(response);
+      }
       setSessionCookie(response, await createSession(user.id));
       response.json({ user: publicUser(user), recoveryCodes });
     } catch (error) {
@@ -852,7 +1435,10 @@ function createApp(options = {}) {
   });
 
   app.get('/api/auth/me', requireAuth, (request, response) => {
-    response.json({ user: publicUser(request.authUser) });
+    response.json({
+      user: publicUser(request.authUser),
+      ...(supabaseStorage ? { avatarEnabled: true, realtimeEnabled: true } : {})
+    });
   });
 
   app.get('/api/expenses/export.csv', requireAuth, async (request, response, next) => {
@@ -949,7 +1535,7 @@ function createApp(options = {}) {
   app.put('/api/settings', requireAuth, async (request, response, next) => {
     try {
       const displayName = String(request.body?.displayName || '').trim();
-      const monthlyBudget = Number(request.body?.monthlyBudget);
+      const monthlyBudget = validateMoney(request.body?.monthlyBudget, 'Monthly budget');
       const currentSettings = await readUserFile(request.authUser.id, 'settings.json', {});
       const currency = String(request.body?.currency || currentSettings.currency || DEFAULT_CURRENCY).toUpperCase();
       if (!displayName || displayName.length > 60 || !Number.isFinite(monthlyBudget) || monthlyBudget <= 0 || monthlyBudget > 1_000_000_000) {
@@ -1048,11 +1634,18 @@ function createApp(options = {}) {
         active: true,
         nextRunDate: nextMonthlyDate(day, today)
       };
+      const scheduledRunDate = schedule.nextRunDate;
       const recurring = await readUserFile(request.authUser.id, 'recurring.json', []);
       recurring.push(schedule);
       await writeUserFile(request.authUser.id, 'recurring.json', recurring);
-      await processDueRecurring(request.authUser.id);
-      response.status(201).json(schedule);
+      const { recurring: savedSchedules, expenses: savedExpenses } =
+        await processDueRecurring(request.authUser.id);
+      const savedSchedule = savedSchedules.find((item) => item.id === schedule.id);
+      if (!savedSchedule) throw new Error('The recurring schedule could not be confirmed after saving.');
+      const generatedExpense = savedExpenses.find((expense) =>
+        expense.recurringId === schedule.id && expense.recurringDate === scheduledRunDate
+      ) || null;
+      response.status(201).json({ ...savedSchedule, generatedExpense });
     } catch (error) {
       next(error);
     }
@@ -1065,6 +1658,266 @@ function createApp(options = {}) {
       if (index === -1) return response.status(404).json({ error: 'Recurring schedule not found.' });
       const [removed] = recurring.splice(index, 1);
       await writeUserFile(request.authUser.id, 'recurring.json', recurring);
+      response.json(removed);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/income', requireAuth, async (request, response, next) => {
+    try {
+      const { incomes } = await processDueRecurringIncome(request.authUser.id);
+      response.json(incomes);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/income', requireAuth, async (request, response, next) => {
+    try {
+      const income = {
+        id: crypto.randomUUID(),
+        name: validateName(request.body?.name, 'Income source'),
+        amount: validateMoney(request.body?.amount),
+        date: validateReminderDate(request.body?.date),
+        description: String(request.body?.description || '').trim()
+      };
+      if (income.description.length > 160) throw invalidInput('Descriptions must be 160 characters or fewer.');
+      const incomes = await readUserFile(request.authUser.id, 'income.json', []);
+      incomes.push(income);
+      await writeUserFile(request.authUser.id, 'income.json', incomes);
+      response.status(201).json(income);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete('/api/income/:id', requireAuth, async (request, response, next) => {
+    try {
+      const incomes = await readUserFile(request.authUser.id, 'income.json', []);
+      const index = incomes.findIndex((income) => income.id === request.params.id);
+      if (index < 0) return response.status(404).json({ error: 'Income record not found.' });
+      const [removed] = incomes.splice(index, 1);
+      await writeUserFile(request.authUser.id, 'income.json', incomes);
+      response.json(removed);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/recurring-income', requireAuth, async (request, response, next) => {
+    try {
+      const { schedules } = await processDueRecurringIncome(request.authUser.id);
+      response.json(schedules);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/recurring-income', requireAuth, async (request, response, next) => {
+    try {
+      const name = validateName(request.body?.name, 'Income source');
+      const amount = validateMoney(request.body?.amount);
+      const day = Number(request.body?.day);
+      const description = String(request.body?.description || '').trim();
+      if (!Number.isInteger(day) || day < 1 || day > 28) throw invalidInput('Choose a monthly day between 1 and 28.');
+      if (description.length > 160) throw invalidInput('Descriptions must be 160 characters or fewer.');
+      const today = localDateISO(new Date());
+      const schedule = {
+        id: crypto.randomUUID(),
+        name,
+        amount,
+        description,
+        day,
+        active: true,
+        nextRunDate: nextMonthlyDate(day, today)
+      };
+      const schedules = await readUserFile(request.authUser.id, 'recurring-income.json', []);
+      schedules.push(schedule);
+      await writeUserFile(request.authUser.id, 'recurring-income.json', schedules);
+      const { incomes, schedules: savedSchedules } = await processDueRecurringIncome(request.authUser.id);
+      const savedSchedule = savedSchedules.find((item) => item.id === schedule.id);
+      const generatedIncome = incomes.find((income) =>
+        income.recurringId === schedule.id && income.recurringDate === schedule.nextRunDate
+      ) || null;
+      response.status(201).json({ ...savedSchedule, generatedIncome });
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete('/api/recurring-income/:id', requireAuth, async (request, response, next) => {
+    try {
+      const schedules = await readUserFile(request.authUser.id, 'recurring-income.json', []);
+      const index = schedules.findIndex((schedule) => schedule.id === request.params.id);
+      if (index < 0) return response.status(404).json({ error: 'Recurring income schedule not found.' });
+      const [removed] = schedules.splice(index, 1);
+      await writeUserFile(request.authUser.id, 'recurring-income.json', schedules);
+      response.json(removed);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/budgets', requireAuth, async (request, response, next) => {
+    try {
+      response.json(await readUserFile(request.authUser.id, 'budgets.json', []));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/budgets', requireAuth, async (request, response, next) => {
+    try {
+      const period = String(request.body?.period || '');
+      const category = String(request.body?.category || 'all').trim();
+      const amount = validateMoney(request.body?.amount, 'Budget');
+      if (!['weekly', 'monthly'].includes(period)) throw invalidInput('Budget period must be weekly or monthly.');
+      if (category !== 'all' && !(await getCategories(request.authUser.id)).some((item) => item.name === category)) {
+        throw invalidInput('Choose a valid budget category.');
+      }
+      const budgets = await readUserFile(request.authUser.id, 'budgets.json', []);
+      let budget = budgets.find((item) => item.period === period && item.category === category);
+      if (budget) {
+        budget.amount = amount;
+      } else {
+        budget = { id: crypto.randomUUID(), period, category, amount };
+        budgets.push(budget);
+      }
+      await writeUserFile(request.authUser.id, 'budgets.json', budgets);
+      response.status(201).json(budget);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete('/api/budgets/:id', requireAuth, async (request, response, next) => {
+    try {
+      const budgets = await readUserFile(request.authUser.id, 'budgets.json', []);
+      const index = budgets.findIndex((budget) => budget.id === request.params.id);
+      if (index < 0) return response.status(404).json({ error: 'Budget not found.' });
+      const [removed] = budgets.splice(index, 1);
+      await writeUserFile(request.authUser.id, 'budgets.json', budgets);
+      response.json(removed);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/goals', requireAuth, async (request, response, next) => {
+    try {
+      response.json(await readUserFile(request.authUser.id, 'goals.json', []));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/goals', requireAuth, async (request, response, next) => {
+    try {
+      const name = validateName(request.body?.name, 'Goal name', 60);
+      const targetAmount = validateMoney(request.body?.targetAmount, 'Target amount');
+      const targetDate = request.body?.targetDate ? validateReminderDate(request.body.targetDate) : '';
+      const goal = {
+        id: crypto.randomUUID(),
+        name,
+        targetAmount,
+        currentAmount: 0,
+        targetDate,
+        createdAt: new Date().toISOString()
+      };
+      const goals = await readUserFile(request.authUser.id, 'goals.json', []);
+      goals.push(goal);
+      await writeUserFile(request.authUser.id, 'goals.json', goals);
+      response.status(201).json(goal);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/goals/:id/contributions', requireAuth, async (request, response, next) => {
+    try {
+      const amount = validateMoney(request.body?.amount, 'Contribution');
+      const goals = await readUserFile(request.authUser.id, 'goals.json', []);
+      const goal = goals.find((item) => item.id === request.params.id);
+      if (!goal) return response.status(404).json({ error: 'Savings goal not found.' });
+      goal.currentAmount = addMoney(goal.currentAmount, amount);
+      await writeUserFile(request.authUser.id, 'goals.json', goals);
+      response.json(goal);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete('/api/goals/:id', requireAuth, async (request, response, next) => {
+    try {
+      const goals = await readUserFile(request.authUser.id, 'goals.json', []);
+      const index = goals.findIndex((goal) => goal.id === request.params.id);
+      if (index < 0) return response.status(404).json({ error: 'Savings goal not found.' });
+      const [removed] = goals.splice(index, 1);
+      await writeUserFile(request.authUser.id, 'goals.json', goals);
+      response.json(removed);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.get('/api/reminders', requireAuth, async (request, response, next) => {
+    try {
+      response.json(await readUserFile(request.authUser.id, 'reminders.json', []));
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post('/api/reminders', requireAuth, async (request, response, next) => {
+    try {
+      const type = request.body?.type ?? 'custom';
+      if (!['bill', 'savings', 'custom'].includes(type)) {
+        throw invalidInput('Reminder type must be bill, savings, or custom.');
+      }
+      const amountValue = request.body?.amount;
+      const reminder = {
+        id: crypto.randomUUID(),
+        title: validateName(request.body?.title, 'Reminder title', 80),
+        date: validateReminderDate(request.body?.date),
+        description: String(request.body?.description || '').trim(),
+        type,
+        amount: amountValue === undefined || amountValue === null || amountValue === ''
+          ? null
+          : validateMoney(amountValue),
+        completed: false
+      };
+      if (reminder.description.length > 160) throw invalidInput('Descriptions must be 160 characters or fewer.');
+      const reminders = await readUserFile(request.authUser.id, 'reminders.json', []);
+      reminders.push(reminder);
+      await writeUserFile(request.authUser.id, 'reminders.json', reminders);
+      response.status(201).json(reminder);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.patch('/api/reminders/:id', requireAuth, async (request, response, next) => {
+    try {
+      const reminders = await readUserFile(request.authUser.id, 'reminders.json', []);
+      const reminder = reminders.find((item) => item.id === request.params.id);
+      if (!reminder) return response.status(404).json({ error: 'Reminder not found.' });
+      if (typeof request.body?.completed !== 'boolean') throw invalidInput('Provide a completed status.');
+      reminder.completed = request.body.completed;
+      await writeUserFile(request.authUser.id, 'reminders.json', reminders);
+      response.json(reminder);
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.delete('/api/reminders/:id', requireAuth, async (request, response, next) => {
+    try {
+      const reminders = await readUserFile(request.authUser.id, 'reminders.json', []);
+      const index = reminders.findIndex((item) => item.id === request.params.id);
+      if (index < 0) return response.status(404).json({ error: 'Reminder not found.' });
+      const [removed] = reminders.splice(index, 1);
+      await writeUserFile(request.authUser.id, 'reminders.json', reminders);
       response.json(removed);
     } catch (error) {
       next(error);
@@ -1087,7 +1940,42 @@ function createApp(options = {}) {
   return app;
 }
 
+function loadEnvFile(envPath) {
+  try {
+    if (typeof process.loadEnvFile === 'function') {
+      process.loadEnvFile(envPath);
+      return;
+    }
+  } catch (error) {
+    if (error.code === 'ENOENT') return;
+  }
+  try {
+    if (fs.existsSync(envPath)) {
+      const content = fs.readFileSync(envPath, 'utf8');
+      for (const line of content.split(/\r?\n/)) {
+        const trimmed = line.trim();
+        if (!trimmed || trimmed.startsWith('#')) continue;
+        const eq = trimmed.indexOf('=');
+        if (eq > 0) {
+          const key = trimmed.slice(0, eq).trim();
+          let val = trimmed.slice(eq + 1).trim();
+          if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+            val = val.slice(1, -1);
+          }
+          if (process.env[key] === undefined) {
+            process.env[key] = val;
+          }
+        }
+      }
+    }
+  } catch {}
+}
+
 if (require.main === module) {
+  loadEnvFile(path.join(__dirname, '.env'));
+  if (process.env.NODE_ENV !== 'production' && !process.env.SPENDWISE_DEV_AUTH && !process.env.SPENDWISE_MFA_ENCRYPTION_KEY) {
+    process.env.SPENDWISE_DEV_AUTH = 'true';
+  }
   const app = createApp();
   const port = process.env.PORT || 3000;
   app.listen(port, () => {
@@ -1095,4 +1983,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { createApp };
+module.exports = { createApp, loadEnvFile };

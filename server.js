@@ -195,7 +195,8 @@ function createApp(options = {}) {
   const loginAttempts = new Map();
   const secureCookies = process.env.NODE_ENV === 'production';
   const sendVerificationEmail = options.sendVerificationEmail;
-  const appUrl = options.appUrl || process.env.SPENDWISE_APP_URL || 'http://localhost:3000';
+  const vercelAppUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : '';
+  const appUrl = options.appUrl || process.env.SPENDWISE_APP_URL || vercelAppUrl || 'http://localhost:3000';
   const developmentAuthRequested = options.developmentAuth === true || process.env.SPENDWISE_DEV_AUTH === 'true';
   const developmentSkipEmailMfaRequested =
     options.skipEmailAndMfa === true || process.env.SPENDWISE_DEV_SKIP_EMAIL_MFA === 'true';
@@ -724,7 +725,7 @@ function createApp(options = {}) {
 
   app.use(express.json({ limit: '32kb' }));
   app.use('/data', (request, response) => response.sendStatus(404));
-  app.use(express.static(__dirname));
+  app.use(express.static(path.join(__dirname, 'public')));
   app.use('/api', (request, response, next) => {
     if (!developmentSkipEmailMfaEnabled || isLoopbackRequest(request)) return next();
     response.status(403).json({ error: 'The local development authentication bypass only accepts localhost connections.' });

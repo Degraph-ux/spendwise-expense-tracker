@@ -41,6 +41,23 @@ The interface uses shared CSS tokens for brand colors, text, surfaces, borders, 
 4. Open `http://localhost:3000` in your browser. The local server provides API access; opening `index.html` directly does not.
 5. For local development, create an account and continue directly to the dashboard. Email verification is disabled only when the development bypass below is enabled. Otherwise, configure SMTP before account creation. Authenticator MFA is optional.
 
+### Deploying to Vercel
+
+The app runs as an Express Vercel Function and builds its browser files into the ignored `public/` directory. Deploy from the `main` branch after pushing these files to GitHub.
+
+1. In Vercel, choose **Add New → Project**, import `degraphengineer-ux/expense-tracker-by-michaelmyeko`, and keep the Express framework preset and default build settings from `vercel.json`.
+2. Before deploying, add these environment variables in the Vercel project settings for **Production**, **Preview**, and **Development**:
+   - `SUPABASE_URL` — the project URL (not a `/rest/v1` URL).
+   - `SUPABASE_PUBLISHABLE_KEY` — the publishable key; never use a service-role key here.
+   - `SPENDWISE_STORAGE=supabase`.
+   Do not set `SPENDWISE_DEV_AUTH` or `SPENDWISE_DEV_SKIP_EMAIL_MFA` to `true` on Vercel. No `data/` filesystem storage is used in production.
+3. Click **Deploy**. Vercel builds the static files and deploys the Express API. Open the assigned `*.vercel.app` URL and copy its origin.
+4. In Vercel environment variables, set `SPENDWISE_APP_URL` to that production origin (for example `https://your-project.vercel.app`) for Production, then redeploy.
+5. In Supabase **Authentication → URL Configuration**, set **Site URL** to the production origin and add it to **Redirect URLs**. Keep `http://localhost:3000/` for local development. For Preview deployments, add an appropriate narrowly scoped `https://*.vercel.app/**` redirect pattern if you need OAuth or email callbacks to work there.
+6. If using Google or Microsoft sign-in, keep the identity providers' callback URI pointed at Supabase (`https://<project-ref>.supabase.co/auth/v1/callback`); only the post-login redirect points back to Vercel. Test registration, verification email, login, password reset, and data isolation on the deployed URL.
+
+Deployments from `main` become production deployments; other branches create previews. See [Vercel's Express deployment guide](https://vercel.com/docs/frameworks/backend/express) for current platform behavior.
+
 ### Supabase backend configuration
 
 New installations use Supabase Auth and relational Postgres tables protected by RLS. The Express server and existing vanilla-JavaScript interface are retained. The app uses user JWTs with the publishable/anon key for database operations; the service-role key is used only by the explicit one-time JSON migration command. Local development without Supabase configured continues to use JSON files. Production startup requires Supabase configuration.

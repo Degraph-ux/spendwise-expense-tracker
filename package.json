@@ -1,0 +1,24 @@
+{
+  "name": "spendwise-dashboard",
+  "version": "1.0.0",
+  "description": "Full-stack expense tracker dashboard",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "npm run build && node --watch server.js",
+    "prestart": "npm run build",
+    "build": "node scripts/build-vercel.js",
+    "build:icons": "node scripts/build-icons.js",
+    "migrate:supabase": "node scripts/import-json-to-supabase.js",
+    "test": "node --test"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.119.0",
+    "express": "^4.19.2",
+    "gsap": "^3.15.1",
+    "nodemailer": "^10.5.0"
+  },
+  "devDependencies": {
+    "@hugeicons/core-free-icons": "^4.4.0"
+  }
+}
